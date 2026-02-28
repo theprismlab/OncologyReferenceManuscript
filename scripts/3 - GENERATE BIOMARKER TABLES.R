@@ -152,6 +152,131 @@ RF.lauc <- biomarker_suite_rf_cv(X, LAUC, biomarker_file = file, CompoundList = 
 
 RF.lauc %>%  saveRDS("results/biomarkers.RDS") 
 
+# ----
+# BIOMARKER SUMMARY TABLES ----
+# ----
+
+
+# auxilary tables
+BM.Summary.Table <- RF.lauc$model_performances %>% 
+  dplyr::filter(K > 0) %>% 
+  dplyr::group_by(model, cn, CompoundName) %>%  
+  dplyr::summarise(mse = mean(mse), r.sd = sd(r),  r = mean(r), var.y = mean(var.y.test)) %>% 
+  dplyr::mutate(r2 = 1 - mse / var.y) %>% 
+  dplyr::group_by(cn) %>%
+  dplyr::mutate(r.m = max(r[!model %in% c("targets", "extended")]),
+                n.t = length(setdiff(model, c("targets", "extended"))),
+                model.class = ifelse(model == "extended", "Extended", 
+                                     ifelse(model == "targets", "Targets", 
+                                            ifelse(r == r.m, "Best Single Target", "Other Targets")))) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::select(-r.m)
+
+DF <- RF.lauc$predictions %>% 
+  dplyr::filter(type == "test") %>%
+  tidyr::drop_na() %>% 
+  dplyr::group_by(CompoundName, model) %>% 
+  dplyr::arrange(y.hat) %>% 
+  dplyr::mutate(n = 1:n(), N = n(),
+                p = var(y) * (1 / n + 1 / (N - n)), 
+                cs = cumsum(y), 
+                s = sum(y)) %>% 
+  dplyr::mutate(m1 = cs / n, m2 = (s - cs) / (N - n),
+                t = -(m1 - m2) / sqrt(p), 
+                df = N -2 ) %>%
+  dplyr::select(-p, -s, -cs, -m1, -m2, -df, -K) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::distinct()
+
+
+DF <- BM.Summary.Table %>% 
+  dplyr::left_join(DF %>% 
+                     dplyr::filter(is.finite(t)) %>% 
+                     dplyr::group_by(CompoundName, model, N) %>% 
+                     dplyr::summarize(t.mean = mean(t),
+                                      t.peak = max(t),
+                                      n.peak = min(n[t == t.peak])) %>% 
+                     dplyr::ungroup()) %>% 
+  dplyr::left_join(CompoundList %>% 
+                     dplyr::distinct(CompoundName, GeneSymbolOfTargets, TargetOrMechanism))
+
+
+
+
+# Scores table
+Scores.Table <- BM.Summary.Table %>% 
+  dplyr::filter(model.class != "Other Targets") %>% 
+  dplyr::distinct(CompoundName, cn, n.t, r, r.sd, model.class) 
+
+
+
+Scores.Table <- Scores.Table %>% 
+  dplyr::filter(model.class == "Best Single Target") %>% 
+  tidyr::pivot_wider(names_from = "model.class", values_from = c("r", "r.sd")) %>% 
+  dplyr::full_join(Scores.Table %>% 
+                     dplyr::filter(model.class != "Best Single Target") %>% 
+                     tidyr::pivot_wider(names_from = "model.class", values_from = c("r", "r.sd"))) %>%
+  dplyr::rowwise() %>% 
+  dplyr::mutate(PolypharmacologyScore = ifelse(n.t > 1, (r_Targets - `r_Best Single Target`) / sqrt((r.sd_Targets^2 + `r.sd_Best Single Target`)/20)  , 0),
+                ExcessPredictabilityScore = ifelse(PolypharmacologyScore > 0, 
+                                                   (r_Extended - r_Targets) / sqrt((r.sd_Targets^2 + r.sd_Extended)/20) ,
+                                                   (r_Extended - `r_Best Single Target`) / sqrt((r.sd_Extended^2 + `r.sd_Best Single Target`)/20))) %>% 
+  dplyr::mutate(PolypharmacologyScore = pmax(PolypharmacologyScore, 0),
+                ExcessPredictabilityScore = pmax(ExcessPredictabilityScore, 0),
+                Best.r = pmax(r_Extended, pmax(r_Targets, `r_Best Single Target`))) %>%
+  dplyr::distinct(CompoundName, cn, n.t, PolypharmacologyScore, ExcessPredictabilityScore, Best.r, r_Extended, r_Targets, `r_Best Single Target`) %>% 
+  dplyr::ungroup()
+
+
+Scores.Table <- DF %>% 
+  dplyr::filter(model %in% c("targets", "extended")) %>% 
+  dplyr::distinct(cn, CompoundName, model, t.mean, t.peak, N, n.peak) %>% 
+  dplyr::mutate(SelectivityScore = t.peak - pmax(t.mean, 0)) %>% 
+  tidyr::pivot_wider(names_from = model, values_from = c("SelectivityScore", "t.mean", "t.peak", "N", "n.peak")) %>% 
+  dplyr::left_join(Scores.Table) %>% 
+  dplyr::rename(OnTargetPolypharmacologyScore = PolypharmacologyScore,
+                OffTargetPolypharmacologyScore = ExcessPredictabilityScore,
+                n.targets = n.t) %>% 
+  dplyr::select(cn, CompoundName, Best.r,
+                OnTargetPolypharmacologyScore, OffTargetPolypharmacologyScore,
+                SelectivityScore_extended, SelectivityScore_targets,
+                r_Extended, r_Targets, `r_Best Single Target`,
+                n.peak_extended, t.peak_extended, t.mean_extended, N_extended, 
+                n.peak_targets, t.peak_targets, t.mean_targets, N_targets,
+                n.targets)
+
+
+# Variable importances 
+Importance.Table <- RF.lauc$variable_importances %>% 
+  dplyr::filter(K> 0) %>% 
+  dplyr::group_by(cn, model, K) %>% 
+  dplyr::mutate(imp = imp / sum(imp)) %>%  
+  dplyr::group_by(cn, CompoundName, model, var) %>% 
+  dplyr::summarise(imp = sum(imp)/20) %>% 
+  dplyr::group_by(cn, CompoundName, model) %>%
+  dplyr::arrange(desc(imp)) %>% 
+  dplyr::mutate(rank = 1:n()) %>% 
+  dplyr::ungroup() 
+
+# Predictability results
+Predictability.Table <- RF.lauc$model_performances %>% 
+  dplyr::filter(K > 0) %>% 
+  dplyr::group_by(cn, CompoundName, model) %>% 
+  dplyr::summarise_all(function(x) mean(x, na.rm = T)) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::select(cn, CompoundName, model, mse, r2, r, var.y.test)
+
+
+
+Predictability.Table %>%
+  write_csv("results/model_performances.csv")
+
+Importance.Table %>% 
+  write_csv("results/variable_importances.csv")
+
+Scores.Table %>%
+  write_csv("results/model_scores.csv")
+
 
 # ----
 # Biomarkers for TK/RTK Vignette ----
@@ -183,3 +308,90 @@ TK.RTK.BM <- biomarker_suite_rf_cv(X = X, Y = TK.RTK.LAUC,  biomarker_file = fil
 
 
 TK.RTK.BM %>% saveRDS("results/tk_rtk_biomarkers.RDS") 
+
+
+# Variable importances 
+TK.RTK.Importance.Table <- TK.RTK.BM$variable_importances %>% 
+  dplyr::filter(K> 0) %>% 
+  dplyr::group_by(cn, model, K) %>% 
+  dplyr::mutate(imp = imp / sum(imp)) %>%  
+  dplyr::group_by(cn, CompoundName, model, var) %>% 
+  dplyr::summarise(imp = sum(imp)/20) %>% 
+  dplyr::group_by(cn, CompoundName, model) %>%
+  dplyr::arrange(desc(imp)) %>% 
+  dplyr::mutate(rank = 1:n()) %>% 
+  dplyr::ungroup() 
+
+# Predictability results
+TK.RTK.Predictability.Table <- TK.RTK.BM$model_performances %>% 
+  dplyr::filter(K > 0) %>% 
+  dplyr::group_by(cn, CompoundName, model) %>% 
+  dplyr::summarise_all(function(x) mean(x, na.rm = T)) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::select(cn, CompoundName, model, mse, r2, r, var.y.test)
+
+
+
+
+
+
+# Scores table
+TK.RTK.BM <- readRDS("results/tk_rtk_biomarkers.RDS")
+
+
+TK.RTK.performances <- RF.lauc$model_performances %>%
+  dplyr::filter(CompoundName %in% TK.RTK.BM$model_performances$CompoundName,
+                model == "targets") %>% 
+  dplyr::mutate(model = "real_targets") %>% 
+  dplyr::bind_rows(TK.RTK.BM$model_performances)
+
+
+TK.RTK.BM.Summary.Table <- TK.RTK.performances %>% 
+  dplyr::filter(K > 0) %>% 
+  dplyr::group_by(model, cn, CompoundName) %>%  
+  dplyr::summarise(mse = mean(mse), r.sd = sd(r),  r = mean(r), var.y = mean(var.y.test)) %>% 
+  dplyr::mutate(r2 = 1 - mse / var.y) %>% 
+  dplyr::group_by(cn) %>%
+  dplyr::mutate(r.m = max(r[!model %in% c("targets", "extended", "real_targets")]),
+                n.t = length(setdiff(model, c("targets", "extended", "real_targets"))),
+                model.class = ifelse(model == "extended", "Extended", 
+                                     ifelse(model == "targets", "TK.RTK",
+                                            ifelse(model == "real_targets", "Targets",
+                                                   ifelse(r == r.m, "Best Single Target", "Other Targets"))))) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::select(-r.m)
+
+
+
+TK.RTK.Scores.Table <- TK.RTK.BM.Summary.Table %>% 
+  dplyr::filter(model.class != "Other Targets") %>% 
+  dplyr::distinct(CompoundName, cn, n.t, r, r.sd, model.class) 
+
+
+TK.RTK.Scores.Table <- TK.RTK.Scores.Table %>% 
+  dplyr::filter(model.class == "Best Single Target") %>% 
+  tidyr::pivot_wider(names_from = "model.class", values_from = c("r", "r.sd")) %>% 
+  dplyr::full_join(TK.RTK.Scores.Table %>% 
+                     dplyr::filter(model.class != "Best Single Target") %>% 
+                     tidyr::pivot_wider(names_from = "model.class", values_from = c("r", "r.sd"))) %>%
+  dplyr::rowwise() %>% 
+  dplyr::mutate(OnTargetPolypharmacologyScore = ifelse(n.t > 1, (r_Targets - `r_Best Single Target`) / sqrt((r.sd_Targets^2 + `r.sd_Best Single Target`)/20)  , 0),
+                RTKPolypharmacologyScore = (r_TK.RTK - `r_Targets`) / sqrt((r.sd_Targets^2 + `r.sd_TK.RTK`)/20)) %>% 
+  dplyr::mutate(OnTargetPolypharmacologyScore = pmax(OnTargetPolypharmacologyScore, 0),
+                RTKPolypharmacologyScore = pmax(RTKPolypharmacologyScore, 0), 
+                Best.r = pmax(r_Extended, pmax(r_Targets, pmax(r_TK.RTK, `r_Best Single Target`)))) %>%
+  dplyr::distinct(CompoundName, cn, Best.r, OnTargetPolypharmacologyScore, RTKPolypharmacologyScore) %>% 
+  dplyr::ungroup()
+
+
+
+TK.RTK.Predictability.Table %>%
+  write_csv("results/tk_rtk_model_performances.csv")
+
+TK.RTK.Importance.Table %>% 
+  write_csv("results/tk_rtk_variable_importances.csv")
+
+TK.RTK.Scores.Table %>% 
+  write_csv("results/tk_rtk_model_scores.csv")
+
+
