@@ -4,14 +4,14 @@ library(parallel)
 
 
 source("scripts/UTILITIES.R")
-file <- "extra/depmap_25Q3_public.h5"
+file <- "data/external inputs/depmap_25Q3_public.h5"
 
 
 # -----
 # Load the PRISM data ----
 # -----
 
-CompoundList <- data.table::fread("data/PRISMOncologyReferenceCompoundList.csv") %>% 
+CompoundList <- data.table::fread("data/input data/PRISMOncologyReferenceCompoundList.csv") %>% 
   dplyr::mutate(cn = paste0(SampleID, "::", CompoundPlate))
 
 selected_compounds <- CompoundList %>% 
@@ -19,29 +19,15 @@ selected_compounds <- CompoundList %>%
   .$cn %>% unique
   
 
-LAUC <- data.table::fread("data/PRISMOncologyReferenceLog2AUCMatrix.csv") %>% 
+LAUC <- data.table::fread("data/processed data/PRISMOncologyReferenceLog2AUCMatrix.csv") %>% 
   column_to_rownames("V1") %>% 
   as.matrix() 
 LAUC <- LAUC[, selected_compounds]
 
-LFC <- data.table::fread("data/PRISMOncologyReferenceLog2ViabilityCollapsedMatrix.csv") %>% 
+LFC <- data.table::fread("data/processed data/PRISMOncologyReferenceLog2ViabilityCollapsedMatrix.csv") %>% 
   column_to_rownames("V1") %>% 
   as.matrix() 
 LFC <- LFC[, word(colnames(LFC), 1,2, sep = fixed("::")) %in% selected_compounds]
-
-
-LAUC0 <- data.table::fread("data/PRISMOncologyReferenceLog2AUCMatrix_no_reg.csv") %>% 
-  column_to_rownames("V1") %>% 
-  as.matrix() 
-LAUC0 <- LAUC0[, selected_compounds]
-
-LFC0 <- data.table::fread("data/PRISMOncologyReferenceLog2ViabilityCollapsedMatrix_no_reg.csv") %>% 
-  column_to_rownames("V1") %>% 
-  as.matrix() 
-LFC0 <- LFC0[, word(colnames(LFC0), 1,2, sep = fixed("::")) %in% selected_compounds]
-
-
-
 
 CompoundList <- CompoundList %>% 
   dplyr::filter(Prioritized)
@@ -56,20 +42,20 @@ CompoundList <- CompoundList %>%
 bm.lauc.complete <- univariate_biomarker_table(Y = LAUC, file = file, q_val_max = 1, rank.max = 1e6)
 
 bm.lauc.complete %>% 
-  write_csv("results/lauc_univariate_biomarkers_complete.csv")
+  write_csv("results/biomarker results/lauc_univariate_biomarkers_complete.csv")
 
 
 # Compute the top 100 correlates with q < 0.1 and n > 250 along with annotations
 bm.lauc <- target_recovery(Y = LAUC, file = file, compound_annotations = CompoundList) 
 
 bm.lauc %>% 
-  write_csv("results/lauc_univariate_biomarkers.csv")
+  write_csv("results/biomarker results/lauc_univariate_biomarkers.csv")
 
 # Compoute per lfc univariate biomarkers with the same constraints
 bm.lfc <- target_recovery(Y = LFC, file = file, compound_annotations = CompoundList)
 
 bm.lfc %>% 
-  write_csv("results/lfc_univariate_biomarkers.csv")
+  write_csv("results/biomarker results/lfc_univariate_biomarkers.csv")
 
 
 
@@ -150,7 +136,7 @@ X <- X[cl, ]; X <- X[, apply(X, 2, var) > 0.005]
 RF.lauc <- biomarker_suite_rf_cv(X, LAUC, biomarker_file = file, CompoundList = CompoundList,                                       
                                     bm_th = 0.05, bm_R = 10, bm_R2 = 50, K = 20, seed = 23)
 
-RF.lauc %>%  saveRDS("results/biomarkers.RDS") 
+RF.lauc %>%  saveRDS("results/biomarker results/biomarkers.RDS") 
 
 # ----
 # BIOMARKER SUMMARY TABLES ----
@@ -269,20 +255,20 @@ Predictability.Table <- RF.lauc$model_performances %>%
 
 
 Predictability.Table %>%
-  write_csv("results/model_performances.csv")
+  write_csv("results/biomarker results/model_performances.csv")
 
 Importance.Table %>% 
-  write_csv("results/variable_importances.csv")
+  write_csv("results/biomarker results/variable_importances.csv")
 
 Scores.Table %>%
-  write_csv("results/model_scores.csv")
+  write_csv("results/biomarker results/model_scores.csv")
 
 
 # ----
 # Biomarkers for TK/RTK Vignette ----
 # ----
 
-TKRTK_gene_symbols <- data.table::fread("extra/TKRTK_gene_symbols.csv")
+TKRTK_gene_symbols <- data.table::fread("data/external inputs/TKRTK_gene_symbols.csv")
 TKRTK_gene_symbols$GeneSymbol
  
  
@@ -296,7 +282,7 @@ TK.RTK.CL <- CompoundList %>%
    dplyr::mutate(GeneSymbolOfTargets = paste0(sort(unique(TKRTK_gene_symbols$GeneSymbol)), collapse = ";"))
 
 
-TK.RTK.LAUC <- data.table::fread("data/PRISMOncologyReferenceLog2AUCMatrix.csv") %>% 
+TK.RTK.LAUC <- data.table::fread("data/processed data/PRISMOncologyReferenceLog2AUCMatrix.csv") %>% 
    column_to_rownames("V1") %>% 
    as.matrix() 
 
@@ -307,7 +293,7 @@ TK.RTK.BM <- biomarker_suite_rf_cv(X = X, Y = TK.RTK.LAUC,  biomarker_file = fil
                        bm_th = 0.05, bm_R = 10, bm_R2 = 50, K = 20, seed = 23)
 
 
-TK.RTK.BM %>% saveRDS("results/tk_rtk_biomarkers.RDS") 
+TK.RTK.BM %>% saveRDS("results/biomarker results for TK:RTK vignette/tk_rtk_biomarkers.RDS") 
 
 
 # Variable importances 
@@ -336,8 +322,6 @@ TK.RTK.Predictability.Table <- TK.RTK.BM$model_performances %>%
 
 
 # Scores table
-TK.RTK.BM <- readRDS("results/tk_rtk_biomarkers.RDS")
-
 
 TK.RTK.performances <- RF.lauc$model_performances %>%
   dplyr::filter(CompoundName %in% TK.RTK.BM$model_performances$CompoundName,
@@ -386,12 +370,12 @@ TK.RTK.Scores.Table <- TK.RTK.Scores.Table %>%
 
 
 TK.RTK.Predictability.Table %>%
-  write_csv("results/tk_rtk_model_performances.csv")
+  write_csv("results/biomarker results for TK:RTK vignette/tk_rtk_model_performances.csv")
 
 TK.RTK.Importance.Table %>% 
-  write_csv("results/tk_rtk_variable_importances.csv")
+  write_csv("results/biomarker results for TK:RTK vignette/tk_rtk_variable_importances.csv")
 
 TK.RTK.Scores.Table %>% 
-  write_csv("results/tk_rtk_model_scores.csv")
+  write_csv("results/biomarker results for TK:RTK vignette/tk_rtk_model_scores.csv")
 
 
