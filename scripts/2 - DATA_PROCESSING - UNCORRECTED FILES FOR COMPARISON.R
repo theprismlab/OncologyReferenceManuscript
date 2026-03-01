@@ -9,7 +9,7 @@ source("scripts/UTILITIES.R")
 #----
 
 inst_meta <- data.table::fread("data/input data/PRISMOncologyReferenceInstMeta.csv")
-analyte_meta <- data.table::fread("data/input data/PRISMOncologyReferenceAnalyteMetal.csv")
+analyte_meta <- data.table::fread("data/input data/PRISMOncologyReferenceAnalyteMeta.csv")
 LFC <- data.table::fread("data/processed data/PRISMOncologyReferenceLFC.csv")
 
 # ----
