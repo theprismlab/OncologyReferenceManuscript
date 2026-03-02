@@ -143,7 +143,7 @@ RF.lauc %>%  saveRDS("results/biomarker results/biomarkers.RDS")
 # ----
 
 
-# auxilary tables
+# auxiliary tables
 BM.Summary.Table <- RF.lauc$model_performances %>% 
   dplyr::filter(K > 0) %>% 
   dplyr::group_by(model, cn, CompoundName) %>%  
