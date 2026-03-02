@@ -386,10 +386,10 @@ target_recovery <- function(Y, file, compound_annotations,  features = c("CRISPR
 }
 
 
+
 biomarker_suite_rf <- function(X, Y, biomarker_file, CompoundList, test_samples = NULL, bm_th = 0.05, bm_R = 10,  bm_R2 = 50, features =c("CRISPR", "RNAi", "Expression", "Mutation", "CopyNumber", "Fusion", "Lineage")){
   require(tidyverse)
   require(ranger)
-  
   
   train <- setdiff(rownames(Y), test_samples) %>% intersect(rownames(X))
   test <- intersect(rownames(Y), test_samples) %>% intersect(rownames(X))
@@ -415,22 +415,26 @@ biomarker_suite_rf <- function(X, Y, biomarker_file, CompoundList, test_samples 
     dplyr::distinct() %>% 
     dplyr::rename(cn.feat = cn) %>% 
     dplyr::inner_join(targets)
-
+  
   
   selected_features <- bm.auc %>% 
     dplyr::distinct(cn, CompoundName, feature_set, feature, rank, correlation_coef, q_val, status) %>%
     dplyr::filter((status == "Other") | (feature_set == "Lineage")) %>% 
-    dplyr::filter(((rank <= bm_R) & (correlation_coef^2 >= bm_th)) | (rank <= 1)) %>%
-    dplyr::group_by(cn) %>% 
-    dplyr::arrange(q_val) %>%
-    dplyr::mutate(rank_ = 1:n()) %>% 
-    dplyr::group_by(cn, q_val) %>%
-    dplyr::mutate(rank_ = min(rank_, na.rm = T)) %>% 
-    dplyr::ungroup() %>% 
-    dplyr::filter(rank_ <= bm_R2) %>% 
-    dplyr::ungroup() 
-
-
+    dplyr::filter(((rank <= bm_R) & (correlation_coef^2 >= bm_th)) | (rank <= 1)) 
+  
+  if(nrow(selected_features) > 0){
+    selected_features <- selected_features %>%
+      dplyr::group_by(cn) %>% 
+      dplyr::arrange(q_val) %>%
+      dplyr::mutate(rank_ = 1:n()) %>% 
+      dplyr::group_by(cn, q_val) %>%
+      dplyr::mutate(rank_ = min(rank_, na.rm = T)) %>% 
+      dplyr::ungroup() %>% 
+      dplyr::filter(rank_ <= bm_R2) %>% 
+      dplyr::ungroup() 
+  }
+  
+  
   
   selected_columns <- selected_features %>%
     dplyr::distinct(cn, CompoundName, feature_set, feature) %>% 
@@ -455,7 +459,8 @@ biomarker_suite_rf <- function(X, Y, biomarker_file, CompoundList, test_samples 
     
     y.hat <- tibble(depmap_id = union(cl, cl.test), 
                     y.hat = pr$predictions, y = y[union(cl, cl.test)],
-                    type = ifelse(depmap_id %in% cl, "train", "test"))
+                    type = ifelse(depmap_id %in% cl, "train", "test")) %>% 
+      dplyr::left_join(tibble(depmap_id = cl, y.hat.oob = rf$predictions))
     
     
     imp <- tibble(var = names(rf$variable.importance), imp = rf$variable.importance) %>%
@@ -525,7 +530,7 @@ biomarker_suite_rf <- function(X, Y, biomarker_file, CompoundList, test_samples 
     }
     
     cols <- unique(union(dplyr::filter(targets, cn == cmp, GeneSymbolOfTargets %in% tars)$cn.feat, extras))
-    if(length(extras) > 0){
+    if(length(cols) > 0){
       # fit the extended model
       x <- X[names(y), cols, drop = F]
       
@@ -541,19 +546,20 @@ biomarker_suite_rf <- function(X, Y, biomarker_file, CompoundList, test_samples 
         dplyr::mutate(model = "extended")
       
       
-      # put them all together
-      biomarker_table[[jx]] <- res %>% 
-        dplyr::bind_rows() %>% 
-        dplyr::mutate(cn = cmp)
-      
-      prediction_table[[jx]] <- pred %>% 
-        dplyr::bind_rows() %>% 
-        dplyr::mutate(cn = cmp)
-      
-      importance_table[[jx]] <- imp %>% 
-        dplyr::bind_rows() %>% 
-        dplyr::mutate(cn = cmp)
     }
+    
+    # put them all together
+    biomarker_table[[jx]] <- res %>% 
+      dplyr::bind_rows() %>% 
+      dplyr::mutate(cn = cmp)
+    
+    prediction_table[[jx]] <- pred %>% 
+      dplyr::bind_rows() %>% 
+      dplyr::mutate(cn = cmp)
+    
+    importance_table[[jx]] <- imp %>% 
+      dplyr::bind_rows() %>% 
+      dplyr::mutate(cn = cmp)
     
     print(paste0(cmp, " - ", jx))
     jx <- jx + 1
@@ -604,6 +610,7 @@ biomarker_suite_rf_cv <- function(X, Y, biomarker_file, CompoundList, bm_th = 0.
   
   return(list(model_performances = dplyr::bind_rows(RES), predictions = dplyr::bind_rows(PRED),  variable_importances = dplyr::bind_rows(IMP), univariate_biomarkers = temp[[4]]))
 }
+
 
 
 
