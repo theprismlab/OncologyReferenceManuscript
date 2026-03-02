@@ -160,6 +160,8 @@ BM.Summary.Table <- RF.lauc$model_performances %>%
 
 DF <- RF.lauc$predictions %>% 
   dplyr::filter(type == "test") %>%
+  dplyr::select(-y.hat.oob) %>% 
+  dplyr::distinct() %>% 
   tidyr::drop_na() %>% 
   dplyr::group_by(CompoundName, model) %>% 
   dplyr::arrange(y.hat) %>% 
@@ -317,12 +319,7 @@ TK.RTK.Predictability.Table <- TK.RTK.BM$model_performances %>%
   dplyr::select(cn, CompoundName, model, mse, r2, r, var.y.test)
 
 
-
-
-
-
 # Scores table
-
 TK.RTK.performances <- RF.lauc$model_performances %>%
   dplyr::filter(CompoundName %in% TK.RTK.BM$model_performances$CompoundName,
                 model == "targets") %>% 
