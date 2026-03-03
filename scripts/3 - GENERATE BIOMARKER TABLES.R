@@ -4,7 +4,7 @@ library(parallel)
 
 
 source("scripts/UTILITIES.R")
-file <- "data/external inputs/depmap_25Q3_public.h5"
+file <- "data/external inputs/depmap_oncref_manuscript.h5"
 
 
 # -----
