@@ -51,11 +51,11 @@ bm.lauc <- target_recovery(Y = LAUC, file = file, compound_annotations = Compoun
 bm.lauc %>% 
   write_csv("results/biomarker results/lauc_univariate_biomarkers.csv")
 
-# Compoute per lfc univariate biomarkers with the same constraints
-bm.lfc <- target_recovery(Y = LFC, file = file, compound_annotations = CompoundList)
-
-bm.lfc %>% 
-  write_csv("results/biomarker results/lfc_univariate_biomarkers.csv")
+# # Compoute per lfc univariate biomarkers with the same constraints
+# bm.lfc <- target_recovery(Y = LFC, file = file, compound_annotations = CompoundList)
+# 
+# bm.lfc %>% 
+#   write_csv("results/biomarker results/lfc_univariate_biomarkers.csv")
 
 
 
