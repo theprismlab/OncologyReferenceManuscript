@@ -3,6 +3,7 @@ library(magrittr)
 library(scam)
 library(parallel)
 source("scripts/UTILITIES.R")
+set.seed(23)
 
 #----
 # LOAD THE RAW DATA
@@ -130,7 +131,7 @@ lmfi %<>%
 
 profiles = lmfi$profile_id %>% unique
 
-set.seed(23)
+
 lmfi.normalized = list()
 ix = 1
 for (profile in profiles) {
