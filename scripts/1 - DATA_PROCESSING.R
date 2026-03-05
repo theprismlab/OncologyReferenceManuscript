@@ -1,10 +1,10 @@
-renv::restore()
 library(tidyverse)
 library(magrittr)
 library(scam)
 library(parallel)
 library(renv)
 source("scripts/UTILITIES.R")
+renv::restore()
 set.seed(23)
 
 
