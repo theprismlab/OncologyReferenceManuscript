@@ -5,6 +5,26 @@
       {
         "Name": "CRAN",
         "URL": "https://packagemanager.posit.co/cran/latest"
+      },
+      {
+        "Name": "BioCsoft",
+        "URL": "https://bioconductor.org/packages/3.22/bioc"
+      },
+      {
+        "Name": "BioCann",
+        "URL": "https://bioconductor.org/packages/3.22/data/annotation"
+      },
+      {
+        "Name": "BioCexp",
+        "URL": "https://bioconductor.org/packages/3.22/data/experiment"
+      },
+      {
+        "Name": "BioCworkflows",
+        "URL": "https://bioconductor.org/packages/3.22/workflows"
+      },
+      {
+        "Name": "BioCbooks",
+        "URL": "https://bioconductor.org/packages/3.22/books"
       }
     ]
   },
@@ -3212,6 +3232,25 @@
       "Maintainer": "Rich FitzJohn <rich.fitzjohn@gmail.com>",
       "Repository": "CRAN"
     },
+    "impute": {
+      "Package": "impute",
+      "Version": "1.84.0",
+      "Source": "Bioconductor",
+      "Title": "impute: Imputation for microarray data",
+      "Author": "Trevor Hastie, Robert Tibshirani, Balasubramanian Narasimhan, Gilbert Chu",
+      "Description": "Imputation for microarray data (currently KNN only)",
+      "Maintainer": "Balasubramanian Narasimhan <naras@stat.Stanford.EDU>",
+      "Depends": [
+        "R (>= 2.10)"
+      ],
+      "License": "GPL-2",
+      "biocViews": "Microarray",
+      "Repository": "https://bioc-release.r-universe.dev",
+      "RemoteUrl": "https://github.com/bioc/impute",
+      "RemoteRef": "RELEASE_3_22",
+      "RemoteSha": "987333765032b156b0b3bb09a5defb85043d9520",
+      "NeedsCompilation": "yes"
+    },
     "isoband": {
       "Package": "isoband",
       "Version": "0.3.0",
@@ -4267,6 +4306,28 @@
       "Author": "Hadley Wickham [aut, cre]",
       "Maintainer": "Hadley Wickham <hadley@rstudio.com>",
       "Repository": "CRAN"
+    },
+    "preprocessCore": {
+      "Package": "preprocessCore",
+      "Version": "1.72.0",
+      "Source": "Bioconductor",
+      "Title": "A collection of pre-processing functions",
+      "Author": "Ben Bolstad <bmb@bmbolstad.com>",
+      "Maintainer": "Ben Bolstad <bmb@bmbolstad.com>",
+      "Imports": [
+        "stats"
+      ],
+      "Description": "A library of core preprocessing routines.",
+      "License": "LGPL (>= 2)",
+      "URL": "https://github.com/bmbolstad/preprocessCore",
+      "Collate": "normalize.quantiles.R quantile_extensions.R rma.background.correct.R rcModel.R colSummarize.R subColSummarize.R plmr.R plmd.R",
+      "LazyLoad": "yes",
+      "biocViews": "Infrastructure",
+      "Repository": "https://bioc-release.r-universe.dev",
+      "RemoteUrl": "https://github.com/bioc/preprocessCore",
+      "RemoteRef": "RELEASE_3_22",
+      "RemoteSha": "f8fc99ac2632b1d08ec1bfe3021e3e02fc8c60b7",
+      "NeedsCompilation": "yes"
     },
     "prettyunits": {
       "Package": "prettyunits",

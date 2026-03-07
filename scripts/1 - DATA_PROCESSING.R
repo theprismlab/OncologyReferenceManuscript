@@ -526,3 +526,5 @@ LFC.collapsed %>%
   reshape2::acast(depmap_id ~ cn, value.var = "LFC_fitted") %>%  
   write.csv("data/processed data/PRISMOncologyReferenceLog2ViabilityCollapsedMatrix.csv")
 
+
+
