@@ -646,12 +646,13 @@ biomarker_suite_rf_cv <- function(X, Y, biomarker_file, CompoundList, bm_th = 0.
 #' @export
 #'
 #' @examples
-get_best_fit <- function(FC, dose, UL_low=0.8, UL_up=1.01, slope_decreasing=TRUE) {
+get_best_fit <- function(FC, dose, UL_low=0.8, UL_up=1.01, slope_decreasing=TRUE, seed = NULL) {
   require(dr4pl)
   require(drc)
   require(tidyverse)
   require(magrittr)
   
+  if(!is.null(seed)) set.seed(seed)
   
   # Fits a number of alternate models  to the DRC and chooses the best fit.
   

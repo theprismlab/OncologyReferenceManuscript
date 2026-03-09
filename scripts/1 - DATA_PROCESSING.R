@@ -443,7 +443,7 @@ CompoundPlates <- dplyr::distinct(LFC.FILTERED, SampleID, CompoundPlate) %>%
 f <- function(df){
   df %>% 
     dplyr::group_by(SampleID, CompoundPlate, analyte_id, depmap_id, pool_id, cellset, screen) %>%    
-    dplyr::summarise(get_best_fit(pmin(2^LFC_regressed,1.5), pert_dose)) %>%
+    dplyr::summarise(get_best_fit(pmin(2^LFC_regressed,1.5), pert_dose, seed = 23)) %>%
     dplyr::ungroup()
 }
 
