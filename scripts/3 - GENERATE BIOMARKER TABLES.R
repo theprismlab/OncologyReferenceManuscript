@@ -1,11 +1,11 @@
+library(renv)
+renv::restore()
 library(magrittr)
 library(tidyverse)
 library(parallel)
-library(renv)
 source("scripts/UTILITIES.R")
 file <- "data/external inputs/depmap_oncref_manuscript.h5"
 set.seed(23)
-renv::restore()
 
 # -----
 # Load the PRISM data ----

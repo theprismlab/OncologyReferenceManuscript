@@ -1,11 +1,12 @@
+library(renv)
+renv::restore()
 library(tidyverse)
 library(magrittr)
 library(scam)
 library(parallel)
-library(renv)
 source("scripts/UTILITIES.R")
 set.seed(23)
-renv::restore()
+
 
 #----
 # LOAD THE LFC DATA
