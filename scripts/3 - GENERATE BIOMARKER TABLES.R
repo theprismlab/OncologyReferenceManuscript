@@ -42,14 +42,14 @@ CompoundList <- CompoundList %>%
 bm.lauc.complete <- univariate_biomarker_table(Y = LAUC, file = file, q_val_max = 1, rank.max = 1e6)
 
 bm.lauc.complete %>% 
-  write_csv("results/biomarker results/lauc_univariate_biomarkers_complete.csv")
+  write_csv("data/results/biomarker results/lauc_univariate_biomarkers_complete.csv")
 
 
 # Compute the top 100 correlates with q < 0.1 and n > 250 along with annotations
 bm.lauc <- target_recovery(Y = LAUC, file = file, compound_annotations = CompoundList) 
 
 bm.lauc %>% 
-  write_csv("results/biomarker results/lauc_univariate_biomarkers.csv")
+  write_csv("data/results/biomarker results/lauc_univariate_biomarkers.csv")
 
 # # Compoute per lfc univariate biomarkers with the same constraints
 # bm.lfc <- target_recovery(Y = LFC, file = file, compound_annotations = CompoundList)
@@ -136,7 +136,7 @@ X <- X[cl, ]; X <- X[, apply(X, 2, var) > 0.005]
 RF.lauc <- biomarker_suite_rf_cv(X, LAUC, biomarker_file = file, CompoundList = CompoundList,                                       
                                     bm_th = 0.05, bm_R = 10, bm_R2 = 50, K = 20, seed = 23)
 
-RF.lauc %>%  saveRDS("results/biomarker results/biomarkers.RDS") 
+RF.lauc %>%  saveRDS("data/results/biomarker results/biomarkers.RDS") 
 
 # ----
 # BIOMARKER SUMMARY TABLES ----
@@ -257,13 +257,13 @@ Predictability.Table <- RF.lauc$model_performances %>%
 
 
 Predictability.Table %>%
-  write_csv("results/biomarker results/model_performances.csv")
+  write_csv("data/results/biomarker results/model_performances.csv")
 
 Importance.Table %>% 
-  write_csv("results/biomarker results/variable_importances.csv")
+  write_csv("data/results/biomarker results/variable_importances.csv")
 
 Scores.Table %>%
-  write_csv("results/biomarker results/model_scores.csv")
+  write_csv("data/results/biomarker results/model_scores.csv")
 
 
 # ----
@@ -295,7 +295,7 @@ TK.RTK.BM <- biomarker_suite_rf_cv(X = X, Y = TK.RTK.LAUC,  biomarker_file = fil
                        bm_th = 0.05, bm_R = 10, bm_R2 = 50, K = 20, seed = 23)
 
 
-TK.RTK.BM %>% saveRDS("results/biomarker results for TK:RTK vignette/tk_rtk_biomarkers.RDS") 
+TK.RTK.BM %>% saveRDS("data/results/biomarker results for TK:RTK vignette/tk_rtk_biomarkers.RDS") 
 
 
 # Variable importances 
@@ -367,12 +367,12 @@ TK.RTK.Scores.Table <- TK.RTK.Scores.Table %>%
 
 
 TK.RTK.Predictability.Table %>%
-  write_csv("results/biomarker results for TK:RTK vignette/tk_rtk_model_performances.csv")
+  write_csv("data/results/biomarker results for TK:RTK vignette/tk_rtk_model_performances.csv")
 
 TK.RTK.Importance.Table %>% 
-  write_csv("results/biomarker results for TK:RTK vignette/tk_rtk_variable_importances.csv")
+  write_csv("data/results/biomarker results for TK:RTK vignette/tk_rtk_variable_importances.csv")
 
 TK.RTK.Scores.Table %>% 
-  write_csv("results/biomarker results for TK:RTK vignette/tk_rtk_model_scores.csv")
+  write_csv("data/results/biomarker results for TK:RTK vignette/tk_rtk_model_scores.csv")
 
 
