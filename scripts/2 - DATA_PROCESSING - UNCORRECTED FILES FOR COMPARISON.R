@@ -5,6 +5,7 @@ library(magrittr)
 library(scam)
 library(parallel)
 source("scripts/UTILITIES.R")
+
 set.seed(23)
 
 
@@ -12,7 +13,7 @@ set.seed(23)
 # LOAD THE LFC DATA
 #----
 
-inst_meta <- data.table::fread("data/input data/PRISMOncologyReferenceInstMeta.csv")
+inst_meta <- data.table::fread("data_full/input data/PRISMOncologyReferenceInstMeta.csv")
 analyte_meta <- data.table::fread("data/input data/PRISMOncologyReferenceAnalyteMeta.csv")
 LFC <- data.table::fread("data/processed data/PRISMOncologyReferenceLFC.csv")
 
