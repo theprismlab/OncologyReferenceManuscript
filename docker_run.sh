@@ -26,15 +26,15 @@ mkdir -p "$DATA_DIR/results/biomarker results for TK:RTK vignette"
 
 # Script 1 — data processing
 docker run --rm $DOCKER_OPTS \
-  -v "$DATA_DIR:/app/data" \
-  -v "$DATA_DIR/results:/app/results" \
-  oncology-reference "scripts/1 - DATA_PROCESSING.R"
-
+ -v "$DATA_DIR:/app/data" \
+ -v "$DATA_DIR/results:/app/results" \
+ oncology-reference "scripts/1 - DATA_PROCESSING.R"
+ 
 # Script 2 — uncorrected data processing for benchmarking
 docker run --rm $DOCKER_OPTS \
-  -v "$DATA_DIR:/app/data" \
-  -v "$DATA_DIR/results:/app/results" \
-  oncology-reference "scripts/2 - DATA_PROCESSING - UNCORRECTED FILES FOR COMPARISON.R"
+ -v "$DATA_DIR:/app/data" \
+ -v "$DATA_DIR/results:/app/results" \
+ oncology-reference "scripts/2 - DATA_PROCESSING - UNCORRECTED FILES FOR COMPARISON.R"
 
 # Script 3 — biomarker table generation
 docker run --rm $DOCKER_OPTS \
