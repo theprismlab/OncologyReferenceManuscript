@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-docker build --no-cache -t oncology-reference . 
+docker build -t oncology-reference . 
