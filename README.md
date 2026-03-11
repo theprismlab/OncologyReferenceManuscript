@@ -52,5 +52,5 @@ The data directory should contain the input files described above. Processed out
 Scripts 1 and 2 use `parallel::mclapply` with `detectCores() - 1` for dose-response curve fitting. The biomarker pipeline (script 3) is memory-intensive due to large matrix operations. You can control CPU and memory allocation:
 
 ```bash
-./docker_run.sh /path/to/data --cpus 8 --memory 16g
+./docker_run.sh /path/to/data --cpus 8 --memory 24g
 ```
