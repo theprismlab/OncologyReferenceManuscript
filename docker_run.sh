@@ -29,7 +29,7 @@ docker run --rm $DOCKER_OPTS \
  -v "$DATA_DIR:/app/data" \
  -v "$DATA_DIR/results:/app/results" \
  oncology-reference "scripts/1 - DATA_PROCESSING.R"
- 
+
 # Script 2 — uncorrected data processing for benchmarking
 docker run --rm $DOCKER_OPTS \
  -v "$DATA_DIR:/app/data" \

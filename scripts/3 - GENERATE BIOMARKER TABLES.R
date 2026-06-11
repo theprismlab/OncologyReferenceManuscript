@@ -135,9 +135,10 @@ X <- X[cl, ]; X <- X[, apply(X, 2, var) > 0.005]
 # -----
 
 RF.lauc <- biomarker_suite_rf_cv(X, LAUC, biomarker_file = file, CompoundList = CompoundList,                                       
-                                    bm_th = 0.05, bm_R = 10, bm_R2 = 50, K = 20, seed = 23)
+                                    bm_th = 0.05, bm_R = 10, bm_R2 = 50, K = 10, seed = 23)
 
 RF.lauc %>%  saveRDS("data/results/biomarker results/biomarkers.RDS") 
+
 
 # ----
 # BIOMARKER SUMMARY TABLES ----
@@ -206,10 +207,10 @@ Scores.Table <- Scores.Table %>%
                      dplyr::filter(model.class != "Best Single Target") %>% 
                      tidyr::pivot_wider(names_from = "model.class", values_from = c("r", "r.sd"))) %>%
   dplyr::rowwise() %>% 
-  dplyr::mutate(PolypharmacologyScore = ifelse(n.t > 1, (r_Targets - `r_Best Single Target`) / sqrt((r.sd_Targets^2 + `r.sd_Best Single Target`)/20)  , 0),
+  dplyr::mutate(PolypharmacologyScore = ifelse(n.t > 1, (r_Targets - `r_Best Single Target`) / sqrt((r.sd_Targets^2 + `r.sd_Best Single Target`^2)/10)  , 0),
                 ExcessPredictabilityScore = ifelse(PolypharmacologyScore > 0, 
-                                                   (r_Extended - r_Targets) / sqrt((r.sd_Targets^2 + r.sd_Extended)/20) ,
-                                                   (r_Extended - `r_Best Single Target`) / sqrt((r.sd_Extended^2 + `r.sd_Best Single Target`)/20))) %>% 
+                                                   (r_Extended - r_Targets) / sqrt((r.sd_Targets^2 + r.sd_Extended^2)/10) ,
+                                                   (r_Extended - `r_Best Single Target`) / sqrt((r.sd_Extended^2 + `r.sd_Best Single Target`^2)/10))) %>% 
   dplyr::mutate(PolypharmacologyScore = pmax(PolypharmacologyScore, 0),
                 ExcessPredictabilityScore = pmax(ExcessPredictabilityScore, 0),
                 Best.r = pmax(r_Extended, pmax(r_Targets, `r_Best Single Target`))) %>%
@@ -241,7 +242,7 @@ Importance.Table <- RF.lauc$variable_importances %>%
   dplyr::group_by(cn, model, K) %>% 
   dplyr::mutate(imp = imp / sum(imp)) %>%  
   dplyr::group_by(cn, CompoundName, model, var) %>% 
-  dplyr::summarise(imp = sum(imp)/20) %>% 
+  dplyr::summarise(imp = sum(imp)/10) %>% 
   dplyr::group_by(cn, CompoundName, model) %>%
   dplyr::arrange(desc(imp)) %>% 
   dplyr::mutate(rank = 1:n()) %>% 
@@ -265,6 +266,9 @@ Importance.Table %>%
 
 Scores.Table %>%
   write_csv("data/results/biomarker results/model_scores.csv")
+
+
+
 
 
 # ----
@@ -293,7 +297,7 @@ TK.RTK.LAUC <- TK.RTK.LAUC[, TK.RTK.CL$cn]
 
 TK.RTK.BM <- biomarker_suite_rf_cv(X = X, Y = TK.RTK.LAUC,  biomarker_file = file, 
                        CompoundList = TK.RTK.CL,                                       
-                       bm_th = 0.05, bm_R = 10, bm_R2 = 50, K = 20, seed = 23)
+                       bm_th = 0.05, bm_R = 10, bm_R2 = 50, K = 10, seed = 23)
 
 
 TK.RTK.BM %>% saveRDS("data/results/biomarker results for TK:RTK vignette/tk_rtk_biomarkers.RDS") 
@@ -305,7 +309,7 @@ TK.RTK.Importance.Table <- TK.RTK.BM$variable_importances %>%
   dplyr::group_by(cn, model, K) %>% 
   dplyr::mutate(imp = imp / sum(imp)) %>%  
   dplyr::group_by(cn, CompoundName, model, var) %>% 
-  dplyr::summarise(imp = sum(imp)/20) %>% 
+  dplyr::summarise(imp = sum(imp)/10) %>% 
   dplyr::group_by(cn, CompoundName, model) %>%
   dplyr::arrange(desc(imp)) %>% 
   dplyr::mutate(rank = 1:n()) %>% 
@@ -375,5 +379,31 @@ TK.RTK.Importance.Table %>%
 
 TK.RTK.Scores.Table %>% 
   write_csv("data/results/biomarker results for TK:RTK vignette/tk_rtk_model_scores.csv")
+
+# 
+# 
+# FLT3.BM <- biomarker_suite_rf_cv_target_only(X = X, Y = LAUC,  biomarker_file = file, 
+#                                   CompoundList = dplyr::mutate(CompoundList, GeneSymbolOfTargets = "FLT3"),                                       
+#                                   bm_th = 0.05, bm_R = 10, bm_R2 = 50, K = 20, seed = 23)
+# 
+# 
+# FLT3.BM %>% saveRDS("data/results/flt3_biomarkers.RDS") 
+# 
+# 
+# FLT3.BM2 <- biomarker_suite_rf_cv_target_only(X = X, Y = LAUC,  biomarker_file = file, 
+#                                              CompoundList = dplyr::mutate(CompoundList, GeneSymbolOfTargets = "FLT3"),                                       
+#                                              bm_th = 0.05, bm_R = 10, bm_R2 = 50, K = 10, seed = 23)
+# 
+# 
+# FLT3.BM2 %>% saveRDS("data/results/flt3_biomarkers2.RDS") 
+# 
+# 
+# 
+# FLT3.BM3 <- biomarker_suite_rf_cv_target_only(X = X, Y = LAUC,  biomarker_file = file, 
+#                                               CompoundList = dplyr::mutate(CompoundList, GeneSymbolOfTargets = "FLT3"),                                       
+#                                               bm_th = 0.05, bm_R = 10, bm_R2 = 50, K = 5, seed = 23)
+# 
+# 
+# FLT3.BM3 %>% saveRDS("data/results/flt3_biomarkers3.RDS") 
 
 

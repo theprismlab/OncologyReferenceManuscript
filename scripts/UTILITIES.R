@@ -615,6 +615,184 @@ biomarker_suite_rf_cv <- function(X, Y, biomarker_file, CompoundList, bm_th = 0.
 
 
 
+biomarker_suite_rf_target_only <- function(X, Y, biomarker_file, CompoundList, test_samples = NULL, bm_th = 0.05, bm_R = 10,  bm_R2 = 50, features =c("CRISPR", "RNAi", "Expression", "Mutation", "CopyNumber", "Fusion", "Lineage")){
+  require(tidyverse)
+  require(ranger)
+  
+  train <- setdiff(rownames(Y), test_samples) %>% intersect(rownames(X))
+  test <- intersect(rownames(Y), test_samples) %>% intersect(rownames(X))
+
+  
+  targets <- CompoundList %>% 
+    dplyr::distinct(cn, CompoundName,GeneSymbolOfTargets) %>% 
+    tidyr::separate_rows(GeneSymbolOfTargets, sep = ";") %>% 
+    dplyr::mutate(GeneSymbolOfTargets = trimws(GeneSymbolOfTargets)) %>% 
+    dplyr::distinct() %>%
+    tidyr::drop_na()
+  
+  
+  
+  targets <- tibble(cn = colnames(X)) %>%  
+    dplyr::mutate(t1 =  word(word(cn, 2, sep = fixed("_")), sep = fixed(".")),
+                  t2 = word(word(cn, 2, sep = fixed("_")), sep = fixed("--")),
+                  t3 = word(word(cn, 2, sep = fixed("_")),-1, sep = fixed("--"))) %>% 
+    tidyr::pivot_longer(c(t1,t2,t3), values_to = "GeneSymbolOfTargets", names_to = "d") %>% 
+    dplyr::filter(GeneSymbolOfTargets != "X", !is.na(GeneSymbolOfTargets)) %>%
+    dplyr::select(-d) %>% 
+    dplyr::distinct() %>% 
+    dplyr::rename(cn.feat = cn) %>% 
+    dplyr::inner_join(targets)
+  
+  
+  
+  
+  fit <- function(x,y){
+    require(ranger)
+    cl <- intersect(train, names(y))
+    cl.test <- intersect(test, names(y))
+    
+    rf <- ranger::ranger(x = x[cl, , drop = F], y = y[cl] , importance = "impurity")
+    
+    pr <- predict(rf, data = x[union(cl, cl.test), , drop = F])
+    
+    y.hat <- tibble(depmap_id = union(cl, cl.test), 
+                    y.hat = pr$predictions, y = y[union(cl, cl.test)],
+                    type = ifelse(depmap_id %in% cl, "train", "test")) %>% 
+      dplyr::left_join(tibble(depmap_id = cl, y.hat.oob = rf$predictions))
+    
+    
+    imp <- tibble(var = names(rf$variable.importance), imp = rf$variable.importance) %>%
+      dplyr::arrange(desc(imp))
+
+    
+    res <- tibble(mse.oob = mean((rf$predictions - y[cl])^2, na.rm = T),
+                  var.y.train = var(y[cl], na.rm = T), 
+                  r2.oob = mse.oob/var.y.train,
+                  r.oob = cor(rf$predictions, y[cl], use = "p"))
+    
+    if(!is.null(test)){
+      res <- y.hat %>% 
+        dplyr::filter(type == "test") %>% 
+        dplyr::summarise(var.y.test = var(y, na.rm = T),
+                         mse = mean((y - y.hat)^2, na.rm = T),
+                         r2 = 1- mse/var.y.test,
+                         r = cor(y, y.hat, use = "p")) %>%
+        bind_cols(res)
+    }
+    
+    
+    return(list(res, y.hat, imp))
+  }
+  
+  
+  biomarker_table <- list(); prediction_table <- list(); importance_table <- list(); jx <- 1
+  for(cmp in colnames(Y)){
+    tars <- dplyr::filter(targets, cn == cmp)$GeneSymbolOfTargets %>% unique()
+    
+    y <- Y[, cmp]; y <- y[is.finite(y)]
+    res <- list();    pred <- list(); imp <- list(); ix <- 1 
+    
+    if(length(tars) > 0){
+      # fit a model for each target
+      for(tar in tars){
+        
+        x <- X[names(y), unique(dplyr::filter(targets, cn == cmp, GeneSymbolOfTargets == tar)$cn.feat), drop = F]
+        temp <- fit(x,y)
+        
+        res[[ix]] <-  temp[[1]] %>% 
+          dplyr::mutate(model = tar)
+        
+        pred[[ix]] <- temp[[2]] %>% 
+          dplyr::mutate(model = tar)
+        
+        imp[[ix]] <- temp[[3]] %>% 
+          dplyr::mutate(model = tar)
+        
+        ix <- ix + 1
+      }
+      
+      # fit all the targets together
+      x <- X[names(y), unique(dplyr::filter(targets, cn == cmp, GeneSymbolOfTargets %in% tars)$cn.feat), drop = F]
+      temp <- fit(x,y)
+      
+      res[[ix]] <-  temp[[1]] %>% 
+        dplyr::mutate(model = "targets")
+      
+      pred[[ix]] <- temp[[2]] %>% 
+        dplyr::mutate(model = "targets")
+      
+      imp[[ix]] <- temp[[3]] %>% 
+        dplyr::mutate(model = "targets")
+      
+      ix <- ix + 1
+    }
+    
+
+    
+    # put them all together
+    biomarker_table[[jx]] <- res %>% 
+      dplyr::bind_rows() %>% 
+      dplyr::mutate(cn = cmp)
+    
+    prediction_table[[jx]] <- pred %>% 
+      dplyr::bind_rows() %>% 
+      dplyr::mutate(cn = cmp)
+    
+    importance_table[[jx]] <- imp %>% 
+      dplyr::bind_rows() %>% 
+      dplyr::mutate(cn = cmp)
+    
+    print(paste0(cmp, " - ", jx))
+    jx <- jx + 1
+  }
+  
+  return(list(dplyr::bind_rows(biomarker_table) %>% 
+                dplyr::left_join(CompoundList %>% dplyr::distinct(cn, CompoundName)), 
+              dplyr::bind_rows(prediction_table) %>% 
+                dplyr::left_join(CompoundList %>% dplyr::distinct(cn, CompoundName)), 
+              dplyr::bind_rows(importance_table) %>% 
+                dplyr::left_join(CompoundList %>% dplyr::distinct(cn, CompoundName))))
+}
+
+biomarker_suite_rf_cv_target_only <- function(X, Y, biomarker_file, CompoundList, bm_th = 0.05, bm_R = 10, bm_R2 = 50, K = 10, seed = NULL){
+  require(tidyverse)
+  
+  if(!is.null(seed)) set.seed(seed)
+  
+  cl <- intersect(rownames(X), rownames(Y)) %>% sample()
+  RES <- list(); PRED <- list(); IMP <- list()
+  for(k in 1:K){
+    print(k)
+    temp <- biomarker_suite_rf_target_only(X, Y, biomarker_file = biomarker_file, CompoundList = CompoundList, test_samples = cl[seq.int(k, length(cl), by = K)], bm_th = bm_th, bm_R = bm_R, bm_R2 = bm_R2)
+    
+    RES[[k]] <- temp[[1]] %>% 
+      dplyr::mutate(K = k)
+    
+    PRED[[k]] <- temp[[2]] %>% 
+      dplyr::mutate(K = k)
+    
+    IMP[[k]] <- temp[[3]] %>% 
+      dplyr::mutate(K = k)
+  }
+  
+  temp <- biomarker_suite_rf_target_only(X, Y, biomarker_file = biomarker_file, CompoundList = CompoundList, test_samples = NULL, bm_th = bm_th, bm_R = bm_R, bm_R2 = bm_R2)
+  
+  RES[[K + 1]] <- temp[[1]] %>% 
+    dplyr::mutate(K = 0)
+  
+  PRED[[K + 1]] <- temp[[2]] %>% 
+    dplyr::mutate(K = 0)
+  
+  IMP[[K + 1]] <- temp[[3]] %>% 
+    dplyr::mutate(K = 0)
+  
+  
+  return(list(model_performances = dplyr::bind_rows(RES), predictions = dplyr::bind_rows(PRED),  variable_importances = dplyr::bind_rows(IMP)))
+}
+
+
+
+
 # Data processing -----
 
 

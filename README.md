@@ -5,7 +5,7 @@ Data processing and biomarker analysis pipeline for the PRISM Oncology Reference
 ## Scripts
 
 | Script | Description |
-|--------|-------------|
+|----|----|
 | `UTILITIES.R` | Shared functions: dose-response curve fitting, univariate biomarker analysis, target recovery, and random forest biomarker models |
 | `1 - DATA_PROCESSING.R` | Data processing pipeline: noise floor correction, spline normalization, QC, log-fold-change computation, replicate collapsing, dose-response curve fitting, and output matrix generation |
 | `2 - DATA_PROCESSING - UNCORRECTED FILES FOR COMPARISON.R` | Same as script 1 but skips the cell-line artifact regression step, producing uncorrected outputs for benchmarking |
@@ -15,7 +15,7 @@ Data processing and biomarker analysis pipeline for the PRISM Oncology Reference
 
 Scripts expect the following directory structure relative to the project root:
 
-```
+```         
 data/
 ├── input data/
 │   ├── PRISMOncologyReferenceInstMeta.csv
@@ -33,7 +33,7 @@ Outputs are written to `data/processed data/` and `results/`.
 
 ### Build the image
 
-```bash
+``` bash
 ./docker_build.sh
 ```
 
@@ -41,7 +41,7 @@ Outputs are written to `data/processed data/` and `results/`.
 
 Pass the path to your data directory as an argument. The script creates output subdirectories and runs all three scripts in sequence:
 
-```bash
+``` bash
 ./docker_run.sh /path/to/data
 ```
 
@@ -51,6 +51,6 @@ The data directory should contain the input files described above. Processed out
 
 Scripts 1 and 2 use `parallel::mclapply` with `detectCores() - 1` for dose-response curve fitting. The biomarker pipeline (script 3) is memory-intensive due to large matrix operations. You can control CPU and memory allocation:
 
-```bash
+``` bash
 ./docker_run.sh /path/to/data --cpus 8 --memory 24g
 ```
