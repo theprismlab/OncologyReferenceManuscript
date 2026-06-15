@@ -19,7 +19,6 @@ selected_compounds <- CompoundList %>%
   dplyr::filter(Prioritized) %>% 
   .$cn %>% unique
   
-
 LAUC <- data.table::fread("data/processed data/PRISMOncologyReferenceLog2AUCMatrix.csv") %>% 
   column_to_rownames("V1") %>% 
   as.matrix() 
@@ -39,11 +38,11 @@ CompoundList <- CompoundList %>%
 # Target-recovery functions -----
 # -----
 
-# This computes univariate biomarkers without any filtering
-bm.lauc.complete <- univariate_biomarker_table(Y = LAUC, file = file, q_val_max = 1, rank.max = 1e6)
-
-bm.lauc.complete %>% 
-  write_csv("data/results/biomarker results/lauc_univariate_biomarkers_complete.csv")
+# # This computes univariate biomarkers without any filtering
+# bm.lauc.complete <- univariate_biomarker_table(Y = LAUC, file = file, q_val_max = 1, rank.max = 1e6)
+# 
+# bm.lauc.complete %>% 
+#   write_csv("data/results/biomarker results/lauc_univariate_biomarkers_complete.csv")
 
 
 # Compute the top 100 correlates with q < 0.1 and n > 250 along with annotations
@@ -52,11 +51,11 @@ bm.lauc <- target_recovery(Y = LAUC, file = file, compound_annotations = Compoun
 bm.lauc %>% 
   write_csv("data/results/biomarker results/lauc_univariate_biomarkers.csv")
 
-# # Compoute per lfc univariate biomarkers with the same constraints
-# bm.lfc <- target_recovery(Y = LFC, file = file, compound_annotations = CompoundList)
-# 
-# bm.lfc %>% 
-#   write_csv("results/biomarker results/lfc_univariate_biomarkers.csv")
+# Compoute per lfc univariate biomarkers with the same constraints
+bm.lfc <- target_recovery(Y = LFC, file = file, compound_annotations = CompoundList)
+
+bm.lfc %>%
+  write_csv("results/biomarker results/lfc_univariate_biomarkers.csv")
 
 
 
@@ -271,139 +270,5 @@ Scores.Table %>%
 
 
 
-# ----
-# Biomarkers for TK/RTK Vignette ----
-# ----
-
-TKRTK_gene_symbols <- data.table::fread("data/external inputs/TKRTK_gene_symbols.csv")
-TKRTK_gene_symbols$GeneSymbol
- 
- 
-TK.RTK.CL <- CompoundList %>% 
-   dplyr::distinct(CompoundName, GeneSymbolOfTargets, TargetOrMechanism) %>% 
-   tidyr::separate_rows(GeneSymbolOfTargets, sep = ";") %>% 
-   dplyr::filter(GeneSymbolOfTargets %in% TKRTK_gene_symbols$GeneSymbol) %>% 
-   dplyr::select(-GeneSymbolOfTargets) %>% 
-   dplyr::distinct() %>% 
-   dplyr::left_join(CompoundList) %>% 
-   dplyr::mutate(GeneSymbolOfTargets = paste0(sort(unique(TKRTK_gene_symbols$GeneSymbol)), collapse = ";"))
-
-
-TK.RTK.LAUC <- data.table::fread("data/processed data/PRISMOncologyReferenceLog2AUCMatrix.csv") %>% 
-   column_to_rownames("V1") %>% 
-   as.matrix() 
-
-TK.RTK.LAUC <- TK.RTK.LAUC[, TK.RTK.CL$cn]
-
-TK.RTK.BM <- biomarker_suite_rf_cv(X = X, Y = TK.RTK.LAUC,  biomarker_file = file, 
-                       CompoundList = TK.RTK.CL,                                       
-                       bm_th = 0.05, bm_R = 10, bm_R2 = 50, K = 10, seed = 23)
-
-
-TK.RTK.BM %>% saveRDS("data/results/biomarker results for TK:RTK vignette/tk_rtk_biomarkers.RDS") 
-
-
-# Variable importances 
-TK.RTK.Importance.Table <- TK.RTK.BM$variable_importances %>% 
-  dplyr::filter(K> 0) %>% 
-  dplyr::group_by(cn, model, K) %>% 
-  dplyr::mutate(imp = imp / sum(imp)) %>%  
-  dplyr::group_by(cn, CompoundName, model, var) %>% 
-  dplyr::summarise(imp = sum(imp)/10) %>% 
-  dplyr::group_by(cn, CompoundName, model) %>%
-  dplyr::arrange(desc(imp)) %>% 
-  dplyr::mutate(rank = 1:n()) %>% 
-  dplyr::ungroup() 
-
-# Predictability results
-TK.RTK.Predictability.Table <- TK.RTK.BM$model_performances %>% 
-  dplyr::filter(K > 0) %>% 
-  dplyr::group_by(cn, CompoundName, model) %>% 
-  dplyr::summarise_all(function(x) mean(x, na.rm = T)) %>% 
-  dplyr::ungroup() %>% 
-  dplyr::select(cn, CompoundName, model, mse, r2, r, var.y.test)
-
-
-# Scores table
-TK.RTK.performances <- RF.lauc$model_performances %>%
-  dplyr::filter(CompoundName %in% TK.RTK.BM$model_performances$CompoundName,
-                model == "targets") %>% 
-  dplyr::mutate(model = "real_targets") %>% 
-  dplyr::bind_rows(TK.RTK.BM$model_performances)
-
-
-TK.RTK.BM.Summary.Table <- TK.RTK.performances %>% 
-  dplyr::filter(K > 0) %>% 
-  dplyr::group_by(model, cn, CompoundName) %>%  
-  dplyr::summarise(mse = mean(mse), r.sd = sd(r),  r = mean(r), var.y = mean(var.y.test)) %>% 
-  dplyr::mutate(r2 = 1 - mse / var.y) %>% 
-  dplyr::group_by(cn) %>%
-  dplyr::mutate(r.m = max(r[!model %in% c("targets", "extended", "real_targets")]),
-                n.t = length(setdiff(model, c("targets", "extended", "real_targets"))),
-                model.class = ifelse(model == "extended", "Extended", 
-                                     ifelse(model == "targets", "TK.RTK",
-                                            ifelse(model == "real_targets", "Targets",
-                                                   ifelse(r == r.m, "Best Single Target", "Other Targets"))))) %>% 
-  dplyr::ungroup() %>% 
-  dplyr::select(-r.m)
-
-
-
-TK.RTK.Scores.Table <- TK.RTK.BM.Summary.Table %>% 
-  dplyr::filter(model.class != "Other Targets") %>% 
-  dplyr::distinct(CompoundName, cn, n.t, r, r.sd, model.class) 
-
-
-TK.RTK.Scores.Table <- TK.RTK.Scores.Table %>% 
-  dplyr::filter(model.class == "Best Single Target") %>% 
-  tidyr::pivot_wider(names_from = "model.class", values_from = c("r", "r.sd")) %>% 
-  dplyr::full_join(TK.RTK.Scores.Table %>% 
-                     dplyr::filter(model.class != "Best Single Target") %>% 
-                     tidyr::pivot_wider(names_from = "model.class", values_from = c("r", "r.sd"))) %>%
-  dplyr::rowwise() %>% 
-  dplyr::mutate(OnTargetPolypharmacologyScore = ifelse(n.t > 1, (r_Targets - `r_Best Single Target`) / sqrt((r.sd_Targets^2 + `r.sd_Best Single Target`)/20)  , 0),
-                RTKPolypharmacologyScore = (r_TK.RTK - `r_Targets`) / sqrt((r.sd_Targets^2 + `r.sd_TK.RTK`)/20)) %>% 
-  dplyr::mutate(OnTargetPolypharmacologyScore = pmax(OnTargetPolypharmacologyScore, 0),
-                RTKPolypharmacologyScore = pmax(RTKPolypharmacologyScore, 0), 
-                Best.r = pmax(r_Extended, pmax(r_Targets, pmax(r_TK.RTK, `r_Best Single Target`)))) %>%
-  dplyr::distinct(CompoundName, cn, Best.r, OnTargetPolypharmacologyScore, RTKPolypharmacologyScore) %>% 
-  dplyr::ungroup()
-
-
-
-TK.RTK.Predictability.Table %>%
-  write_csv("data/results/biomarker results for TK:RTK vignette/tk_rtk_model_performances.csv")
-
-TK.RTK.Importance.Table %>% 
-  write_csv("data/results/biomarker results for TK:RTK vignette/tk_rtk_variable_importances.csv")
-
-TK.RTK.Scores.Table %>% 
-  write_csv("data/results/biomarker results for TK:RTK vignette/tk_rtk_model_scores.csv")
-
-# 
-# 
-# FLT3.BM <- biomarker_suite_rf_cv_target_only(X = X, Y = LAUC,  biomarker_file = file, 
-#                                   CompoundList = dplyr::mutate(CompoundList, GeneSymbolOfTargets = "FLT3"),                                       
-#                                   bm_th = 0.05, bm_R = 10, bm_R2 = 50, K = 20, seed = 23)
-# 
-# 
-# FLT3.BM %>% saveRDS("data/results/flt3_biomarkers.RDS") 
-# 
-# 
-# FLT3.BM2 <- biomarker_suite_rf_cv_target_only(X = X, Y = LAUC,  biomarker_file = file, 
-#                                              CompoundList = dplyr::mutate(CompoundList, GeneSymbolOfTargets = "FLT3"),                                       
-#                                              bm_th = 0.05, bm_R = 10, bm_R2 = 50, K = 10, seed = 23)
-# 
-# 
-# FLT3.BM2 %>% saveRDS("data/results/flt3_biomarkers2.RDS") 
-# 
-# 
-# 
-# FLT3.BM3 <- biomarker_suite_rf_cv_target_only(X = X, Y = LAUC,  biomarker_file = file, 
-#                                               CompoundList = dplyr::mutate(CompoundList, GeneSymbolOfTargets = "FLT3"),                                       
-#                                               bm_th = 0.05, bm_R = 10, bm_R2 = 50, K = 5, seed = 23)
-# 
-# 
-# FLT3.BM3 %>% saveRDS("data/results/flt3_biomarkers3.RDS") 
 
 

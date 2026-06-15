@@ -13,9 +13,9 @@ set.seed(23)
 # LOAD THE LFC DATA
 #----
 
-inst_meta <- data.table::fread("data/input data/PRISMOncologyReferenceInstMeta.csv")
-analyte_meta <- data.table::fread("data/input data/PRISMOncologyReferenceAnalyteMeta.csv")
-LFC <- data.table::fread("data/processed data/PRISMOncologyReferenceLFC.csv")
+inst_meta <- data.table::fread("DMC_26Q3/input data/PRISMOncologyReferenceInstMeta.csv")
+analyte_meta <- data.table::fread("DMC_26Q3/input data/PRISMOncologyReferenceAnalyteMeta.csv")
+LFC <- data.table::fread("DMC_26Q3/processed data/PRISMOncologyReferenceLFC.csv")
 
 # ----
 # COLLAPSE REPLICATES 
@@ -148,7 +148,7 @@ DRC %<>%
 
 
 DRC %>% 
-  write_csv("data/processed data without artifact correction (for benchmarking)/PRISMOncologyReferenceDoseResponseParameters_no_reg.csv")
+  write_csv("DMC_26Q3/processed data without artifact correction (for benchmarking)/PRISMOncologyReferenceDoseResponseParameters_no_reg.csv")
 
 
 # ----
@@ -171,7 +171,7 @@ LFC.collapsed %<>%
 
 LFC.collapsed %>%  
   dplyr::distinct(screen, CompoundPlate, SampleID, pert_dose, pert_dose_unit, cellset, pool_id, depmap_id, LFC, LFC_fitted, outlier, priority) %>%
-  write_csv("data/processed data without artifact correction (for benchmarking)/PRISMOncologyReferenceLFCCollapsed_no_reg.csv")
+  write_csv("DMC_26Q3/processed data without artifact correction (for benchmarking)/PRISMOncologyReferenceLFCCollapsed_no_reg.csv")
 
 
 # -----
@@ -182,7 +182,7 @@ DRC %>%
   dplyr::filter(priority == 1, successful_fit) %>% 
   dplyr::mutate(cn = paste0(SampleID , "::", CompoundPlate)) %>% 
   reshape2::acast(depmap_id ~ cn, value.var = "log2_auc") %>% 
-  write.csv("data/processed data without artifact correction (for benchmarking)/PRISMOncologyReferenceLog2AUCMatrix_no_reg.csv")
+  write.csv("DMC_26Q3/processed data without artifact correction (for benchmarking)/PRISMOncologyReferenceLog2AUCMatrix_no_reg.csv")
 
 
 LFC.collapsed %>% 
@@ -190,8 +190,9 @@ LFC.collapsed %>%
   dplyr::filter(!outlier, priority == 1) %>% 
   dplyr::mutate(cn = paste0(SampleID,"::", CompoundPlate, "::", pert_dose )) %>% 
   reshape2::acast(depmap_id ~ cn, value.var = "LFC_fitted") %>%  
-  write.csv("data/processed data without artifact correction (for benchmarking)/PRISMOncologyReferenceLog2ViabilityCollapsedMatrix_no_reg.csv")
+  write.csv("DMC_26Q3/processed data without artifact correction (for benchmarking)/PRISMOncologyReferenceLog2ViabilityCollapsedMatrix_no_reg.csv")
 
 
 
 
+# Better names and make it portal compatible ! 
