@@ -15,10 +15,11 @@ set.seed(23)
 #----
 # LOAD THE RAW DATA
 #----
+"data/input_data/PRISMOncologyReferenceLumInstMeta.csv"
 
-inst_meta <- data.table::fread("DMC_26Q3/input data/PRISMOncologyReferenceLumInstMeta.csv")
-analyte_meta <- data.table::fread("DMC_26Q3/input data/PRISMOncologyReferenceAnalyteMeta.csv")
-lmfi <- data.table::fread("DMC_26Q3/input data/PRISMOncologyReferenceLMFI.csv")
+inst_meta <- data.table::fread("data/input_data/PRISMOncologyReferenceLumInstMeta.csv")
+analyte_meta <- data.table::fread("data/input_data/PRISMOncologyReferenceLumAnalyteMeta.csv")
+lmfi <- data.table::fread("data/input_data/PRISMOncologyReferenceLumLMFI.csv")
 
 # -----
 # FILTER WELLS AND ANALYTES WITH LOW BEAD-COUNTS
@@ -254,7 +255,7 @@ QC = lmfi.normalized %>%
   dplyr::ungroup()
 
 QC %>% 
-  write_csv("DMC_26Q3/processed data/PRISMOncologyReferenceQCTable.csv")
+  write_csv("data/processed_data/PRISMOncologyReferenceLumQCTable.csv")
 
 
 # ----
@@ -339,7 +340,7 @@ LFC %<>%
 
 
 LFC %>% 
-  write_csv("DMC_26Q3/processed data/PRISMOncologyReferenceLFC.csv")
+  write_csv("data/processed_data/PRISMOncologyReferenceLumLFC.csv")
 
 
 # ----
@@ -351,10 +352,11 @@ LFC.collapsed <- LFC %>%
   dplyr::left_join(inst_meta) %>% 
   dplyr::left_join(analyte_meta) %>% 
   dplyr::filter(pert_type == "trt_cp", !is.na(depmap_id), pool_id != "CTLBC") %>%  
-  dplyr::group_by(CompoundPlate, SampleID, pert_dose, pert_dose_unit, cellset, pool_id, depmap_id) %>% 
+  dplyr::group_by(CompoundPlate, SampleID, pert_dose, pert_dose_unit, cellset, pool_id, depmap_id, screen) %>% 
   dplyr::filter(n() > 1) %>% 
   dplyr::summarise(LFC = median(LFC_regressed, na.rm = T)) %>% 
   dplyr::ungroup()
+
 
 
 # ----
@@ -422,7 +424,7 @@ outlier.trt.pools %>%
                      dplyr::left_join(inst_meta) %>% 
                      dplyr::mutate(outlier_type = "nc")) %>% 
   dplyr::distinct(screen, CompoundPlate, prism_replicate, pert_well, pool_id, outlier_type) %>% 
-  write_csv("DMC_26Q3/processed data/PRISMOncologyReferenceFilteredPools.csv")
+  write_csv("data/processed_data/PRISMOncologyReferenceLumFilteredPools.csv")
 
 
 
@@ -434,7 +436,7 @@ LFC.FILTERED <- LFC %>%
   dplyr::left_join(inst_meta) %>%
   dplyr::left_join(analyte_meta) %>% 
   dplyr::filter(is.finite(LFC_regressed), PASS, !outlier, pool_id != "CTLBC", pert_type == "trt_cp") %>%
-  dplyr::group_by(CompoundPlate, SampleID, pert_dose, analyte_id, depmap_id, pool_id, cellset) %>%
+  dplyr::group_by(CompoundPlate, SampleID, pert_dose, analyte_id, depmap_id, pool_id, cellset, screen) %>%
   dplyr::filter(abs(pmin(2^LFC_regressed, 1.5) - median(pmin(2^LFC_regressed, 1.5))) < 0.75) %>%
   dplyr::group_by(CompoundPlate, SampleID, analyte_id, cellset) %>%
   dplyr::filter(length(unique(pert_dose)) > 4, n() > 12) %>%
@@ -482,10 +484,7 @@ DRC %<>%
 
 
 DRC %>% 
-  write_csv("DMC_26Q3/processed data/PRISMOncologyReferenceDoseResponseParameters.csv")
-
-
-
+  write_csv("data/processed_data/PRISMOncologyReferenceLumDoseResponseParameters.csv")
 
 
 # ----
@@ -503,12 +502,13 @@ LFC.fitted <- inst_meta %>%
   dplyr::distinct(screen, CompoundPlate, SampleID, pert_dose, pert_dose_unit, cellset, depmap_id, pool_id, LFC_fitted, priority)
 
 
+
 LFC.collapsed %<>% 
   dplyr::full_join(LFC.fitted) 
 
 LFC.collapsed %>%  
   dplyr::distinct(screen, CompoundPlate, SampleID, pert_dose, pert_dose_unit, cellset, pool_id, depmap_id, LFC, LFC_fitted, outlier, priority) %>%
-  write_csv("DMC_26Q3/processed data/PRISMOncologyReferenceLFCCollapsed.csv")
+  write_csv("data/processed_data/PRISMOncologyReferenceLumLFCCollapsed.csv")
 
 
 # -----
@@ -520,7 +520,7 @@ DRC %>%
   dplyr::filter(priority == 1, successful_fit) %>% 
   dplyr::mutate(cn = paste0(SampleID , "::", CompoundPlate)) %>% 
   reshape2::acast(depmap_id ~ cn, value.var = "log2_auc") %>% 
-  write.csv("DMC_26Q3/processed data/PRISMOncologyReferenceLog2AUCMatrix.csv")
+  write.csv("data/processed_data/PRISMOncologyReferenceLumLog2AUCMatrix.csv")
 
 
 LFC.collapsed %>% 
@@ -528,8 +528,7 @@ LFC.collapsed %>%
   dplyr::filter(!outlier, priority == 1) %>% 
   dplyr::mutate(cn = paste0(SampleID,"::", CompoundPlate, "::", pert_dose )) %>% 
   reshape2::acast(depmap_id ~ cn, value.var = "LFC_fitted") %>%  
-  write.csv("DMC_26Q3/processed data/PRISMOncologyReferenceLog2ViabilityCollapsedMatrix.csv")
+  write.csv("data/processed_data/PRISMOncologyReferenceLumLog2ViabilityCollapsedMatrix.csv")
 
-# To-Do: Add Portal Files! 
 
 

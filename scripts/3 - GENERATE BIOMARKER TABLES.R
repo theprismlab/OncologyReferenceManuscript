@@ -1,161 +1,140 @@
 library(renv)
 renv::restore()
-library(magrittr)
 library(tidyverse)
 library(parallel)
+library(matrixStats) # Added for fast matrix operations
+
 source("scripts/UTILITIES.R")
-file <- "data/external inputs/depmap_oncref_manuscript.h5"
+file_path <- "data/external_input/depmap_26Q1_internal.h5" # !!!
 
 set.seed(23)
 
 # -----
-# Load the PRISM data ----
+# 1. Load the PRISM data ----
 # -----
 
-CompoundList <- data.table::fread("data/input data/PRISMOncologyReferenceCompoundList.csv") %>% 
-  dplyr::mutate(cn = paste0(SampleID, "::", CompoundPlate))
-
-selected_compounds <- CompoundList %>% 
-  dplyr::filter(Prioritized) %>% 
-  .$cn %>% unique
-  
-LAUC <- data.table::fread("data/processed data/PRISMOncologyReferenceLog2AUCMatrix.csv") %>% 
-  column_to_rownames("V1") %>% 
+LAUC <- data.table::fread("data/processed_data/PRISMOncologyReferenceLumLog2AUCMatrix.csv") %>% 
+  tibble::column_to_rownames("V1") %>% 
   as.matrix() 
-LAUC <- LAUC[, selected_compounds]
 
-LFC <- data.table::fread("data/processed data/PRISMOncologyReferenceLog2ViabilityCollapsedMatrix.csv") %>% 
-  column_to_rownames("V1") %>% 
+LFC <- data.table::fread("data/processed_data/PRISMOncologyReferenceLumLog2ViabilityCollapsedMatrix.csv") %>% 
+  tibble::column_to_rownames("V1") %>% 
   as.matrix() 
-LFC <- LFC[, word(colnames(LFC), 1,2, sep = fixed("::")) %in% selected_compounds]
 
-CompoundList <- CompoundList %>% 
-  dplyr::filter(Prioritized)
+CompoundList <- data.table::fread("data/input_data/PRISMOncologyReferenceCompoundList.csv") %>% 
+  dplyr::mutate(cn = paste0(SampleID, "::", CompoundPlate)) %>%
+  dplyr::filter(Prioritized, cn %in% colnames(LAUC))
 
+selected_compounds <- CompoundList %>% dplyr::pull(cn) %>% unique()
+
+
+LAUC <- LAUC[, selected_compounds, drop = FALSE]
+
+LFC <- LFC[, stringr::word(colnames(LFC), 1, 2, sep = stringr::fixed("::")) %in% selected_compounds, drop = FALSE]
 
 
 # -----
-# Target-recovery functions -----
+# 2. Target-recovery functions -----
 # -----
-
-# # This computes univariate biomarkers without any filtering
-# bm.lauc.complete <- univariate_biomarker_table(Y = LAUC, file = file, q_val_max = 1, rank.max = 1e6)
-# 
-# bm.lauc.complete %>% 
-#   write_csv("data/results/biomarker results/lauc_univariate_biomarkers_complete.csv")
-
 
 # Compute the top 100 correlates with q < 0.1 and n > 250 along with annotations
-bm.lauc <- target_recovery(Y = LAUC, file = file, compound_annotations = CompoundList) 
+# bm.lauc <- target_recovery(Y = LAUC, file = file_path, compound_annotations = CompoundList) 
+# readr::write_csv(bm.lauc, "data/biomarker_results/lauc_univariate_biomarkers.csv")
 
-bm.lauc %>% 
-  write_csv("data/results/biomarker results/lauc_univariate_biomarkers.csv")
-
-# Compoute per lfc univariate biomarkers with the same constraints
-bm.lfc <- target_recovery(Y = LFC, file = file, compound_annotations = CompoundList)
-
-bm.lfc %>%
-  write_csv("results/biomarker results/lfc_univariate_biomarkers.csv")
-
+# Compute per lfc univariate biomarkers with the same constraints
+# bm.lfc <- target_recovery(Y = LFC, file = file_path, compound_annotations = CompoundList)
+# readr::write_csv(bm.lfc, "data/biomarker_results/lfc_univariate_biomarkers.csv")
 
 
 # ----
-# Load DepMap data into a single matrix ----
+# 3. Load DepMap data into a single matrix (Optimized) ----
 # ----
 
-X.XPR <- read_dataset(file = file, dataset = "CRISPR")
-cl = intersect(rownames(X.XPR), rownames(LAUC));  X.XPR <- X.XPR[cl, ]
-X.XPR <- X.XPR[ , colMeans(is.finite(X.XPR)) > 0.9]
-colnames(X.XPR) %<>% paste0("CRISPR_", .)
+datasets_to_load <- c(
+  "CRISPR" = "CRISPR", 
+  "RNAi" = "RNAi", 
+  "Expression" = "EXP", 
+  "CopyNumber" = "CN", 
+  "Mutation" = "MUT", 
+  "Lineage" = "LIN", 
+  "Fusion" = "FUS"
+)
 
-X.RNAi <- read_dataset(file = file, dataset = "RNAi")
-cl = intersect(rownames(X.RNAi), rownames(LAUC));  X.RNAi <- X.RNAi[cl, ]
-X.RNAi <- X.RNAi[ , colMeans(is.finite(X.RNAi)) > 0.9]
-colnames(X.RNAi) %<>% paste0("RNAi_", .)
+target_rows <- rownames(LAUC)
 
+# Loop over datasets, clean, align to LAUC, and impute medians natively as matrices
+matrix_list <- lapply(names(datasets_to_load), function(ds_name) {
+  prefix <- datasets_to_load[[ds_name]]
+  mat <- read_dataset(file = file_path, dataset = ds_name)
+  
+  # Intersect with LAUC initially
+  cl <- intersect(rownames(mat), target_rows)
+  mat <- mat[cl, , drop = FALSE]
+  
+  # Keep columns with > 90% finite values
+  mat <- mat[, colMeans(is.finite(mat)) > 0.9, drop = FALSE]
+  colnames(mat) <- paste0(prefix, "_", colnames(mat))
+  
+  # Initialize an empty matrix perfectly aligned to LAUC rows
+  aligned_mat <- matrix(NA_real_, nrow = length(target_rows), ncol = ncol(mat), 
+                        dimnames = list(target_rows, colnames(mat)))
+  
+  # Fill existing rows
+  common_rows <- intersect(target_rows, rownames(mat))
+  aligned_mat[common_rows, ] <- mat[common_rows, ]
+  
+  # Fast median imputation for missing values
+  col_meds <- matrixStats::colMedians(aligned_mat, na.rm = TRUE)
+  na_idx <- which(is.na(aligned_mat), arr.ind = TRUE)
+  if (nrow(na_idx) > 0) {
+    aligned_mat[na_idx] <- col_meds[na_idx[, 2]]
+  }
+  
+  return(aligned_mat)
+})
 
-X.EXP <- read_dataset(file = file, dataset = "Expression")
-cl = intersect(rownames(X.EXP), rownames(LAUC));  X.EXP <- X.EXP[cl, ]
-X.EXP <- X.EXP[ , colMeans(is.finite(X.EXP)) > 0.9]
-colnames(X.EXP) %<>% paste0("EXP_", .)
+# Column-bind all matrices instantly (Replaces reshape2::melt -> join -> acast)
+X <- do.call(cbind, matrix_list)
 
-X.CN <- read_dataset(file = file, dataset = "CopyNumber")
-cl = intersect(rownames(X.CN), rownames(LAUC));  X.CN <- X.CN[cl, ]
-X.CN <- X.CN[ , colMeans(is.finite(X.CN)) > 0.9]
-colnames(X.CN) %<>% paste0("CN_", .)
-
-
-X.MUT <-  read_dataset(file = file, dataset = "Mutation")
-cl = intersect(rownames(X.MUT), rownames(LAUC));  X.MUT <- X.MUT[cl, ]
-X.MUT <- X.MUT[ , colMeans(is.finite(X.MUT)) > 0.9]
-colnames(X.MUT) %<>% paste0("MUT_", .)
-
-
-X.LIN <-  read_dataset(file = file, dataset = "Lineage")
-cl = intersect(rownames(X.LIN), rownames(LAUC));  X.LIN <- X.LIN[cl, ]
-X.LIN <- X.LIN[ , colMeans(is.finite(X.LIN)) > 0.9]
-colnames(X.LIN) %<>% paste0("LIN_", .)
-
-X.FUS <-  read_dataset(file = file, dataset = "Fusion")
-cl = intersect(rownames(X.FUS), rownames(LAUC));  X.FUS <- X.FUS[cl, ]
-X.FUS <- X.FUS[ , colMeans(is.finite(X.FUS)) > 0.9]
-colnames(X.FUS) %<>% paste0("FUS_", .)
-
-
-X <- X.XPR %>%
-  reshape2::melt() %>% 
-  dplyr::bind_rows(reshape2::melt(X.RNAi)) %>%
-  dplyr::bind_rows(reshape2::melt(X.EXP)) %>%
-  dplyr::bind_rows(reshape2::melt(X.CN)) %>%
-  dplyr::bind_rows(reshape2::melt(X.MUT)) %>%
-  dplyr::bind_rows(reshape2::melt(X.FUS)) %>%
-  dplyr::bind_rows(reshape2::melt(X.LIN)) %>%
-  dplyr::filter(is.finite(value))
-
-X <- tibble(Var1 = rownames(LAUC), dummy = 1) %>% 
-  dplyr::left_join(tibble(Var2 = unique(X$Var2), dummy = 1)) %>% 
-  dplyr::select(-dummy) %>% 
-  dplyr::distinct() %>% 
-  dplyr::left_join(X) %>% 
-  dplyr::group_by(Var2) %>% 
-  dplyr::mutate(value = ifelse(is.na(value), median(value, na.rm = T), value)) %>% 
-  dplyr::ungroup() %>% 
-  reshape2::acast(Var1 ~ Var2)
-
-
-rm(X.CN, X.MUT, X.EXP, X.FUS, X.RNAi, X.XPR, X.LIN)
-
-cl <- intersect(rownames(LAUC), rownames(X))
-X <- X[cl, ]; X <- X[, apply(X, 2, var) > 0.005] 
+# Filter final matrix by variance
+X <- X[, matrixStats::colVars(X, na.rm = TRUE) > 0.005, drop = FALSE]
 
 
 # -----
-# RANDOM FOREST MODELS -----
+# 4. RANDOM FOREST MODELS -----
 # -----
 
-RF.lauc <- biomarker_suite_rf_cv(X, LAUC, biomarker_file = file, CompoundList = CompoundList,                                       
-                                    bm_th = 0.05, bm_R = 10, bm_R2 = 50, K = 10, seed = 23)
+RF.lauc <- biomarker_suite_rf_cv(
+  X, LAUC, 
+  biomarker_file = file_path, 
+  CompoundList = CompoundList,                                       
+  bm_th = 0.05, bm_R = 10, bm_R2 = 50, K = 10, seed = 23
+)
 
-RF.lauc %>%  saveRDS("data/results/biomarker results/biomarkers.RDS") 
+saveRDS(RF.lauc, "data/biomarker_results/biomarkers.RDS") 
 
 
 # ----
-# BIOMARKER SUMMARY TABLES ----
+# 5. BIOMARKER SUMMARY TABLES ----
 # ----
 
-
-# auxiliary tables
+# Auxiliary tables
 BM.Summary.Table <- RF.lauc$model_performances %>% 
   dplyr::filter(K > 0) %>% 
   dplyr::group_by(model, cn, CompoundName) %>%  
-  dplyr::summarise(mse = mean(mse), r.sd = sd(r),  r = mean(r), var.y = mean(var.y.test)) %>% 
+  dplyr::summarise(mse = mean(mse), r.sd = sd(r), r = mean(r), var.y = mean(var.y.test), .groups = "drop_last") %>% 
   dplyr::mutate(r2 = 1 - mse / var.y) %>% 
   dplyr::group_by(cn) %>%
-  dplyr::mutate(r.m = max(r[!model %in% c("targets", "extended")]),
-                n.t = length(setdiff(model, c("targets", "extended"))),
-                model.class = ifelse(model == "extended", "Extended", 
-                                     ifelse(model == "targets", "Targets", 
-                                            ifelse(r == r.m, "Best Single Target", "Other Targets")))) %>% 
+  dplyr::mutate(
+    r.m = max(r[!model %in% c("targets", "extended")], na.rm = TRUE),
+    n.t = length(setdiff(model, c("targets", "extended"))),
+    model.class = dplyr::case_when(
+      model == "extended" ~ "Extended",
+      model == "targets" ~ "Targets",
+      r == r.m ~ "Best Single Target",
+      TRUE ~ "Other Targets"
+    )
+  ) %>% 
   dplyr::ungroup() %>% 
   dplyr::select(-r.m)
 
@@ -166,66 +145,76 @@ DF <- RF.lauc$predictions %>%
   tidyr::drop_na() %>% 
   dplyr::group_by(CompoundName, model) %>% 
   dplyr::arrange(y.hat) %>% 
-  dplyr::mutate(n = 1:n(), N = n(),
-                p = var(y) * (1 / n + 1 / (N - n)), 
-                cs = cumsum(y), 
-                s = sum(y)) %>% 
-  dplyr::mutate(m1 = cs / n, m2 = (s - cs) / (N - n),
-                t = -(m1 - m2) / sqrt(p), 
-                df = N -2 ) %>%
-  dplyr::select(-p, -s, -cs, -m1, -m2, -df, -K) %>% 
+  dplyr::mutate(
+    n = dplyr::row_number(), 
+    N = dplyr::n(),
+    p = var(y) * (1 / n + 1 / (N - n)), 
+    cs = cumsum(y), 
+    s = sum(y),
+    m1 = cs / n, 
+    m2 = (s - cs) / (N - n),
+    t = -(m1 - m2) / sqrt(p)
+  ) %>%
+  dplyr::select(-p, -s, -cs, -m1, -m2, -K) %>% 
   dplyr::ungroup() %>% 
   dplyr::distinct()
 
 
 DF <- BM.Summary.Table %>% 
-  dplyr::left_join(DF %>% 
-                     dplyr::filter(is.finite(t)) %>% 
-                     dplyr::group_by(CompoundName, model, N) %>% 
-                     dplyr::summarize(t.mean = mean(t),
-                                      t.peak = max(t),
-                                      n.peak = min(n[t == t.peak])) %>% 
-                     dplyr::ungroup()) %>% 
-  dplyr::left_join(CompoundList %>% 
-                     dplyr::distinct(CompoundName, GeneSymbolOfTargets, TargetOrMechanism))
+  dplyr::left_join(
+    DF %>% 
+      dplyr::filter(is.finite(t)) %>% 
+      dplyr::group_by(CompoundName, model, N) %>% 
+      dplyr::summarize(
+        t.mean = mean(t),
+        t.peak = max(t),
+        n.peak = min(n[t == t.peak]),
+        .groups = "drop"
+      ),
+    by = c("CompoundName", "model")
+  ) %>% 
+  dplyr::left_join(
+    CompoundList %>% dplyr::distinct(CompoundName, GeneSymbolOfTargets, TargetOrMechanism),
+    by = "CompoundName"
+  )
 
 
-
-
-# Scores table
+# Scores table - Pivot directly without splitting the dataframe
 Scores.Table <- BM.Summary.Table %>% 
   dplyr::filter(model.class != "Other Targets") %>% 
-  dplyr::distinct(CompoundName, cn, n.t, r, r.sd, model.class) 
-
-
-
-Scores.Table <- Scores.Table %>% 
-  dplyr::filter(model.class == "Best Single Target") %>% 
-  tidyr::pivot_wider(names_from = "model.class", values_from = c("r", "r.sd")) %>% 
-  dplyr::full_join(Scores.Table %>% 
-                     dplyr::filter(model.class != "Best Single Target") %>% 
-                     tidyr::pivot_wider(names_from = "model.class", values_from = c("r", "r.sd"))) %>%
+  dplyr::distinct(CompoundName, cn, n.t, r, r.sd, model.class) %>%
+  tidyr::pivot_wider(
+    names_from = model.class, 
+    values_from = c(r, r.sd),
+    names_glue = "{.value}_{model.class}" # Formats as r_Targets, r.sd_Targets, etc.
+  ) %>%
   dplyr::rowwise() %>% 
-  dplyr::mutate(PolypharmacologyScore = ifelse(n.t > 1, (r_Targets - `r_Best Single Target`) / sqrt((r.sd_Targets^2 + `r.sd_Best Single Target`^2)/10)  , 0),
-                ExcessPredictabilityScore = ifelse(PolypharmacologyScore > 0, 
-                                                   (r_Extended - r_Targets) / sqrt((r.sd_Targets^2 + r.sd_Extended^2)/10) ,
-                                                   (r_Extended - `r_Best Single Target`) / sqrt((r.sd_Extended^2 + `r.sd_Best Single Target`^2)/10))) %>% 
-  dplyr::mutate(PolypharmacologyScore = pmax(PolypharmacologyScore, 0),
-                ExcessPredictabilityScore = pmax(ExcessPredictabilityScore, 0),
-                Best.r = pmax(r_Extended, pmax(r_Targets, `r_Best Single Target`))) %>%
-  dplyr::distinct(CompoundName, cn, n.t, PolypharmacologyScore, ExcessPredictabilityScore, Best.r, r_Extended, r_Targets, `r_Best Single Target`) %>% 
-  dplyr::ungroup()
+  dplyr::mutate(
+    PolypharmacologyScore = ifelse(n.t > 1, (r_Targets - `r_Best Single Target`) / sqrt((`r.sd_Targets`^2 + `r.sd_Best Single Target`^2) / 10), 0),
+    ExcessPredictabilityScore = ifelse(PolypharmacologyScore > 0, 
+                                       (r_Extended - r_Targets) / sqrt((`r.sd_Targets`^2 + `r.sd_Extended`^2) / 10),
+                                       (r_Extended - `r_Best Single Target`) / sqrt((`r.sd_Extended`^2 + `r.sd_Best Single Target`^2) / 10))
+  ) %>% 
+  dplyr::mutate(
+    PolypharmacologyScore = pmax(PolypharmacologyScore, 0),
+    ExcessPredictabilityScore = pmax(ExcessPredictabilityScore, 0),
+    Best.r = pmax(r_Extended, r_Targets, `r_Best Single Target`, na.rm = TRUE)
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::distinct(CompoundName, cn, n.t, PolypharmacologyScore, ExcessPredictabilityScore, Best.r, r_Extended, r_Targets, `r_Best Single Target`)
 
 
 Scores.Table <- DF %>% 
   dplyr::filter(model %in% c("targets", "extended")) %>% 
   dplyr::distinct(cn, CompoundName, model, t.mean, t.peak, N, n.peak) %>% 
   dplyr::mutate(SelectivityScore = t.peak - pmax(t.mean, 0)) %>% 
-  tidyr::pivot_wider(names_from = model, values_from = c("SelectivityScore", "t.mean", "t.peak", "N", "n.peak")) %>% 
-  dplyr::left_join(Scores.Table) %>% 
-  dplyr::rename(OnTargetPolypharmacologyScore = PolypharmacologyScore,
-                OffTargetPolypharmacologyScore = ExcessPredictabilityScore,
-                n.targets = n.t) %>% 
+  tidyr::pivot_wider(names_from = model, values_from = c(SelectivityScore, t.mean, t.peak, N, n.peak)) %>% 
+  dplyr::left_join(Scores.Table, by = c("cn", "CompoundName")) %>% 
+  dplyr::rename(
+    OnTargetPolypharmacologyScore = PolypharmacologyScore,
+    OffTargetPolypharmacologyScore = ExcessPredictabilityScore,
+    n.targets = n.t
+  ) %>% 
   dplyr::select(cn, CompoundName, Best.r,
                 OnTargetPolypharmacologyScore, OffTargetPolypharmacologyScore,
                 SelectivityScore_extended, SelectivityScore_targets,
@@ -237,38 +226,27 @@ Scores.Table <- DF %>%
 
 # Variable importances 
 Importance.Table <- RF.lauc$variable_importances %>% 
-  dplyr::filter(K> 0) %>% 
+  dplyr::filter(K > 0) %>% 
   dplyr::group_by(cn, model, K) %>% 
   dplyr::mutate(imp = imp / sum(imp)) %>%  
   dplyr::group_by(cn, CompoundName, model, var) %>% 
-  dplyr::summarise(imp = sum(imp)/10) %>% 
-  dplyr::group_by(cn, CompoundName, model) %>%
+  dplyr::summarise(imp = sum(imp) / 10, .groups = "drop_last") %>% 
   dplyr::arrange(desc(imp)) %>% 
-  dplyr::mutate(rank = 1:n()) %>% 
+  dplyr::mutate(rank = dplyr::row_number()) %>% 
   dplyr::ungroup() 
 
 # Predictability results
 Predictability.Table <- RF.lauc$model_performances %>% 
   dplyr::filter(K > 0) %>% 
   dplyr::group_by(cn, CompoundName, model) %>% 
-  dplyr::summarise_all(function(x) mean(x, na.rm = T)) %>% 
-  dplyr::ungroup() %>% 
+  dplyr::summarise(dplyr::across(dplyr::everything(), ~ mean(.x, na.rm = TRUE)), .groups = "drop") %>% 
   dplyr::select(cn, CompoundName, model, mse, r2, r, var.y.test)
 
 
+# ----
+# 6. SAVE RESULTS ----
+# ----
 
-Predictability.Table %>%
-  write_csv("data/results/biomarker results/model_performances.csv")
-
-Importance.Table %>% 
-  write_csv("data/results/biomarker results/variable_importances.csv")
-
-Scores.Table %>%
-  write_csv("data/results/biomarker results/model_scores.csv")
-
-
-
-
-
-
-
+readr::write_csv(Predictability.Table, "data/biomarker_results/model_performances.csv")
+readr::write_csv(Importance.Table, "data/biomarker_results/variable_importances.csv")
+readr::write_csv(Scores.Table, "data/biomarker_results/model_scores.csv")

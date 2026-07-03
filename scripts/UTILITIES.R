@@ -1,873 +1,685 @@
+
+
+#' Fits Random Forest models for biomarker prediction using univariate target recovery.
+#'
+#' @param X : Feature matrix (n samples by p features) with row names as DepMap IDs.
+#' @param Y : Response matrix (n samples by m compounds) with row names as DepMap IDs.
+#' @param biomarker_file : Path to the downloaded depmap_datasets.h5 file.
+#' @param CompoundList : Dataframe containing compound annotations (must include cn, CompoundName, and GeneSymbolOfTargets).
+#' @param test_samples : Optional vector of sample IDs (DepMap IDs) to hold out for testing. Default is NULL.
+#' @param bm_th : Minimum r-squared correlation threshold for feature selection, default is 0.05.
+#' @param bm_R : Rank threshold for initial feature selection, default is 10.
+#' @param bm_R2 : Final rank threshold after q-value sorting, default is 50.
+#' @param features : Character vector of feature sets to include.
+#'
+#' @return A list containing four dataframes: model performances, predictions, variable importances, and the baseline univariate biomarkers table.
+#' @export
+biomarker_suite_rf <- function(X, Y, biomarker_file, CompoundList, test_samples = NULL, bm_th = 0.05, bm_R = 10,  bm_R2 = 50, features = c("CRISPR", "RNAi", "Expression", "Mutation", "CopyNumber", "Fusion", "Lineage")) {
+  require(tidyverse)
+  require(ranger)
+  
+  # Fast set operations to define train/test splits
+  train <- intersect(setdiff(rownames(Y), test_samples), rownames(X))
+  test <- intersect(intersect(rownames(Y), test_samples), rownames(X))
+  
+  # Compute target recovery biomarkers on the training set
+  bm.auc <- target_recovery(Y[train, , drop = FALSE], biomarker_file, CompoundList, features = features)
+  
+  # Clean up targets mapping
+  targets <- CompoundList %>% 
+    dplyr::distinct(cn, CompoundName, GeneSymbolOfTargets) %>% 
+    tidyr::separate_rows(GeneSymbolOfTargets, sep = ";") %>% 
+    dplyr::mutate(GeneSymbolOfTargets = trimws(GeneSymbolOfTargets)) %>% 
+    dplyr::distinct() %>%
+    tidyr::drop_na()
+  
+  # Map X column names to actual gene symbols
+  feat_map <- tibble::tibble(cn = colnames(X)) %>%  
+    dplyr::mutate(
+      t1 = stringr::word(stringr::word(cn, 2, sep = stringr::fixed("_")), sep = stringr::fixed(".")),
+      t2 = stringr::word(stringr::word(cn, 2, sep = stringr::fixed("_")), sep = stringr::fixed("--")),
+      t3 = stringr::word(stringr::word(cn, 2, sep = stringr::fixed("_")), -1, sep = stringr::fixed("--"))
+    ) %>% 
+    tidyr::pivot_longer(cols = c(t1, t2, t3), values_to = "GeneSymbolOfTargets", names_to = "d") %>% 
+    dplyr::filter(GeneSymbolOfTargets != "X", !is.na(GeneSymbolOfTargets)) %>%
+    dplyr::select(-d) %>% 
+    dplyr::distinct() %>% 
+    dplyr::rename(cn.feat = cn) %>% 
+    dplyr::inner_join(targets, by = "GeneSymbolOfTargets")
+  
+  # Filter for selected features based on thresholds
+  selected_features <- bm.auc %>% 
+    dplyr::distinct(cn, CompoundName, feature_set, feature, rank, correlation_coef, q_val, status) %>%
+    dplyr::filter((status == "Other") | (feature_set == "Lineage")) %>% 
+    dplyr::filter(((rank <= bm_R) & (correlation_coef^2 >= bm_th)) | (rank <= 1)) 
+  
+  if (nrow(selected_features) > 0) {
+    selected_features <- selected_features %>%
+      dplyr::group_by(cn) %>% 
+      dplyr::mutate(rank_ = dplyr::min_rank(q_val)) %>% 
+      dplyr::ungroup() %>% 
+      dplyr::filter(rank_ <= bm_R2) 
+  }
+  
+  # Named vector dictionary to replace the nested ifelse statement
+  prefix_map <- c(
+    "CRISPR"     = "CRISPR_", 
+    "RNAi"       = "RNAi_", 
+    "Expression" = "EXP_", 
+    "CopyNumber" = "CN_", 
+    "Mutation"   = "MUT_", 
+    "Fusion"     = "FUS_", 
+    "Lineage"    = "LIN_"
+  )
+  
+  selected_columns <- selected_features %>%
+    dplyr::distinct(cn, CompoundName, feature_set, feature) %>% 
+    dplyr::mutate(
+      tar = prefix_map[feature_set],
+      y = paste0(tar, feature)
+    ) %>% 
+    dplyr::filter(!is.na(tar)) 
+  
+  # Inner model fitting function
+  fit <- function(x, y) {
+    cl <- intersect(train, names(y))
+    cl.test <- intersect(test, names(y))
+    all_cl <- union(cl, cl.test)
+    
+    rf <- ranger::ranger(x = x[cl, , drop = FALSE], y = y[cl], importance = "impurity")
+    pr <- predict(rf, data = x[all_cl, , drop = FALSE])
+    
+    y.hat <- tibble::tibble(
+      depmap_id = all_cl, 
+      y.hat = pr$predictions, 
+      y = y[all_cl],
+      type = ifelse(depmap_id %in% cl, "train", "test")
+    ) %>% 
+      dplyr::left_join(tibble::tibble(depmap_id = cl, y.hat.oob = rf$predictions), by = "depmap_id")
+    
+    imp <- tibble::tibble(var = names(rf$variable.importance), imp = rf$variable.importance) %>%
+      dplyr::arrange(desc(imp))
+    
+    res <- tibble::tibble(
+      mse.oob = mean((rf$predictions - y[cl])^2, na.rm = TRUE),
+      var.y.train = var(y[cl], na.rm = TRUE), 
+      r2.oob = mse.oob / var.y.train,
+      r.oob = cor(rf$predictions, y[cl], use = "p")[, 1]
+    )
+    
+    if (length(cl.test) > 0) {
+      test_res <- y.hat %>% 
+        dplyr::filter(type == "test") %>% 
+        dplyr::summarise(
+          var.y.test = var(y, na.rm = TRUE),
+          mse = mean((y - y.hat)^2, na.rm = TRUE),
+          r2 = 1 - mse / var.y.test,
+          r = cor(y, y.hat, use = "p")[, 1]
+        )
+      res <- dplyr::bind_cols(test_res, res)
+    }
+    
+    return(list(res, y.hat, imp))
+  }
+  
+  
+  # Initialize lists for accumulating RF models
+  biomarker_table <- list()
+  prediction_table <- list()
+  importance_table <- list()
+  jx <- 1
+  
+  for (cmp in colnames(Y)) {
+    tars <- feat_map %>% dplyr::filter(cn == cmp) %>% dplyr::pull(GeneSymbolOfTargets) %>% unique()
+    extras <- selected_columns %>% dplyr::filter(cn == cmp) %>% dplyr::pull(y) %>% intersect(colnames(X))
+    
+    y <- Y[, cmp]
+    y <- y[is.finite(y)]
+    
+    res_list <- list()
+    pred_list <- list()
+    imp_list <- list()
+    ix <- 1 
+    
+    if (length(tars) > 0) {
+      # Fit a model for each individual target
+      for (tar in tars) {
+        tar_feats <- feat_map %>% dplyr::filter(cn == cmp, GeneSymbolOfTargets == tar) %>% dplyr::pull(cn.feat) %>% unique()
+        temp <- fit(x = X[names(y), tar_feats, drop = FALSE], y = y)
+        
+        res_list[[ix]]  <- temp[[1]] %>% dplyr::mutate(model = tar)
+        pred_list[[ix]] <- temp[[2]] %>% dplyr::mutate(model = tar)
+        imp_list[[ix]]  <- temp[[3]] %>% dplyr::mutate(model = tar)
+        ix <- ix + 1
+      }
+      
+      # Fit a model for ALL targets together
+      all_tar_feats <- feat_map %>% dplyr::filter(cn == cmp, GeneSymbolOfTargets %in% tars) %>% dplyr::pull(cn.feat) %>% unique()
+      temp <- fit(x = X[names(y), all_tar_feats, drop = FALSE], y = y)
+      
+      res_list[[ix]]  <- temp[[1]] %>% dplyr::mutate(model = "targets")
+      pred_list[[ix]] <- temp[[2]] %>% dplyr::mutate(model = "targets")
+      imp_list[[ix]]  <- temp[[3]] %>% dplyr::mutate(model = "targets")
+      ix <- ix + 1
+    }
+    
+    cols <- unique(union(feat_map %>% dplyr::filter(cn == cmp, GeneSymbolOfTargets %in% tars) %>% dplyr::pull(cn.feat), extras))
+    if (length(cols) > 0) {
+      # Fit the extended model (Targets + Extracted Predictors)
+      temp <- fit(x = X[names(y), cols, drop = FALSE], y = y)
+      
+      res_list[[ix]]  <- temp[[1]] %>% dplyr::mutate(model = "extended")
+      pred_list[[ix]] <- temp[[2]] %>% dplyr::mutate(model = "extended")
+      imp_list[[ix]]  <- temp[[3]] %>% dplyr::mutate(model = "extended")
+    }
+    
+    # Bundle compound results together
+    biomarker_table[[jx]]  <- dplyr::bind_rows(res_list) %>% dplyr::mutate(cn = cmp)
+    prediction_table[[jx]] <- dplyr::bind_rows(pred_list) %>% dplyr::mutate(cn = cmp)
+    importance_table[[jx]] <- dplyr::bind_rows(imp_list) %>% dplyr::mutate(cn = cmp)
+    
+    message(paste0(cmp, " - ", jx))
+    jx <- jx + 1
+  }
+  
+  cmp_annotations <- CompoundList %>% dplyr::distinct(cn, CompoundName)
+  
+  return(list(
+    dplyr::bind_rows(biomarker_table) %>% dplyr::left_join(cmp_annotations, by = "cn"), 
+    dplyr::bind_rows(prediction_table) %>% dplyr::left_join(cmp_annotations, by = "cn"), 
+    dplyr::bind_rows(importance_table) %>% dplyr::left_join(cmp_annotations, by = "cn"), 
+    bm.auc
+  ))
+}
+
+
+#' Performs K-fold cross-validation for the Random Forest biomarker suite.
+#'
+#' @param X : Feature matrix (n samples by p features) with row names as DepMap IDs.
+#' @param Y : Response matrix (n samples by m compounds) with row names as DepMap IDs.
+#' @param biomarker_file : Path to the downloaded depmap_datasets.h5 file.
+#' @param CompoundList : Dataframe containing compound annotations.
+#' @param bm_th : Minimum r-squared correlation threshold for feature selection, default is 0.05.
+#' @param bm_R : Rank threshold for initial feature selection, default is 10.
+#' @param bm_R2 : Final rank threshold after q-value sorting, default is 50.
+#' @param K : Number of cross-validation folds, default is 10.
+#' @param seed : Random seed for reproducible fold generation, default is NULL.
+#'
+#' @return A list containing combined model_performances, predictions, variable_importances (across all K folds + full model where K=0), and univariate_biomarkers.
+#' @export
+biomarker_suite_rf_cv <- function(X, Y, biomarker_file, CompoundList, bm_th = 0.05, bm_R = 10, bm_R2 = 50, K = 10, seed = NULL) {
+  require(tidyverse)
+  
+  if (!is.null(seed)) set.seed(seed)
+  
+  cl <- intersect(rownames(X), rownames(Y)) %>% sample()
+  
+  RES <- list()
+  PRED <- list()
+  IMP <- list()
+  
+  # Cross Validation Folds
+  for (k in 1:K) {
+    message("Running fold: ", k)
+    
+    # Calculate fold indices safely
+    fold_samples <- cl[seq.int(k, length(cl), by = K)]
+    
+    temp <- biomarker_suite_rf(
+      X, Y, 
+      biomarker_file = biomarker_file, 
+      CompoundList = CompoundList, 
+      test_samples = fold_samples, 
+      bm_th = bm_th, bm_R = bm_R, bm_R2 = bm_R2
+    )
+    
+    RES[[k]]  <- temp[[1]] %>% dplyr::mutate(K = k)
+    PRED[[k]] <- temp[[2]] %>% dplyr::mutate(K = k)
+    IMP[[k]]  <- temp[[3]] %>% dplyr::mutate(K = k)
+  }
+  
+  message("Running Full Model (K = 0)")
+  
+  # Full Model (No test samples)
+  temp_full <- biomarker_suite_rf(
+    X, Y, 
+    biomarker_file = biomarker_file, 
+    CompoundList = CompoundList, 
+    test_samples = NULL, 
+    bm_th = bm_th, bm_R = bm_R, bm_R2 = bm_R2
+  )
+  
+  RES[[K + 1]]  <- temp_full[[1]] %>% dplyr::mutate(K = 0)
+  PRED[[K + 1]] <- temp_full[[2]] %>% dplyr::mutate(K = 0)
+  IMP[[K + 1]]  <- temp_full[[3]] %>% dplyr::mutate(K = 0)
+  
+  return(list(
+    model_performances = dplyr::bind_rows(RES), 
+    predictions = dplyr::bind_rows(PRED), 
+    variable_importances = dplyr::bind_rows(IMP), 
+    univariate_biomarkers = temp_full[[4]]
+  ))
+}
+
 #' Calculates and returns univariate analysis results by correlating each column of Y with features sets from depmap.org.
 #'
-#' @param Y : Matrix n x m, make sure rownames are depmap_id's and columns are named. There can be NA's.
-#' @param file : Please point out to the downloaded depmap_datasets.h5 file.
-#' @param features : You can give a subset of available feature sets, but if left as NULL, it computes for everything.
-#' @param n.X.min : Results with less thana given sample size are dropped, default is 100
-#' @param q_val.max : Results with q-values less than q_val.max are dropped, default is 0.2
-#' @param rank.max : Results with ranks (by q-value) greater than rank.max are dropped, default is 250
+#' @param Y Matrix n x m, make sure rownames are depmap_id's and columns are named. There can be NA's.
+#' @param file Please point out to the downloaded depmap_datasets.h5 file.
+#' @param features You can give a subset of available feature sets, but if left as NULL, it computes for everything.
+#' @param n.X.min Results with less than a given sample size are dropped, default is 250.
+#' @param v.X.min Minimum variance for the columns of X, default is 0.0025.
+#' @param q_val_max Results with q-values less than q_val_max are dropped, default is 0.1.
+#' @param rank.max Results with ranks (by q-value) greater than rank.max are dropped, default is 250.
 #'
-#' @return Returns a data-table with each row corresponds to a particular (feature, feature_set, y) triplet. See linear_model for the other columns.
+#' @return Returns a data-table with each row corresponds to a particular (feature, feature_set, y) triplet.
 #' @export
-#'
-#' @examples
-#'
-univariate_biomarker_table <- function(Y, file, features = NULL, n.X.min = 250, v.X.min = 0.0025, q_val_max = .1, rank.max = 250){
+univariate_biomarker_table <- function(Y, file, features = NULL, n.X.min = 250, v.X.min = 0.0025, q_val_max = 0.1, rank.max = 250) {
   require(tidyverse)
-  require(magrittr)
   require(rhdf5)
   require(WGCNA)
   
-  
-  if(!is.matrix(Y)){
+
+  if (!is.matrix(Y)) {
     Y <- as.matrix(Y)
   }
   
+  # Fetch available features once to avoid redundant h5ls calls
+  h5_groups <- rhdf5::h5ls(file)
+  available_features <- substr(unique(h5_groups$group[h5_groups$name == "mat"]), 2, 100)
   
-  if(is.null(features)){
-    features <-  substr(unique(dplyr::filter(h5ls(file), name == "mat")$group),2,100)
-  }else{
-    features <- intersect(features, substr(unique(dplyr::filter(h5ls(file), name == "mat")$group),2,100))
+  if (is.null(features)) {
+    features <- available_features
+  } else {
+    features <- intersect(features, available_features)
   }
-  print(features)
+  
+  message("Features to process: ", paste(features, collapse = ", "))
   
   RESULTS <- list()
-  for(feat in features){
+  for (feat in features) {
+    X <- read_dataset(file, feat)
+    cl <- intersect(rownames(X), rownames(Y))
+    X <- X[cl, , drop = FALSE]
     
-    
-    X <- read_dataset(file , feat)
-    cl = intersect(rownames(X), rownames(Y))
-    X <- X[cl, ]
-    
-    if((dim(X)[1] >= n.X.min) & (dim(X)[2] > 0)){
+    if (nrow(X) >= n.X.min && ncol(X) > 0) {
+      message(paste0("Processing ", feat, " - ", nrow(X), 'x', ncol(X)))
       
-      print(paste0(feat, " - ", dim(X)[1] ,'x', dim(X)[2]))
-      
-      RESULTS[[feat]] <- linear_model(X = X, Y = Y[cl, , drop = FALSE],
-                                             v.X.min = v.X.min, n.min = n.X.min) %>% 
+      RESULTS[[feat]] <- linear_model(
+        X = X, 
+        Y = Y[cl, , drop = FALSE],
+        v.X.min = v.X.min, 
+        n.min = n.X.min
+      ) %>% 
         dplyr::filter(rank <= rank.max, q_val <= q_val_max) %>% 
         dplyr::rename(feature = x) %>%
         dplyr::mutate(feature_set = feat) 
     }
-    print(feat)
   }
   
-  RESULTS <- dplyr::bind_rows(RESULTS)
-  return(RESULTS)
+  return(dplyr::bind_rows(RESULTS))
 }
-
 
 
 #' Fits a simple linear model by regressing y over each column of X.
 #'
-#' @param X : matrix of n by m, it can have NA's in it, columns should be named.
-#' @param Y : matrix of n by p, rows are in the same order of with the rows of X.
-#' @param v.th : Minimum variance for the columns of X, columns with smaller variances will be dropped.
-#' @param n.min : Minimum number of finite pairs between columns of X and Y, column pairs not satisfying this condition will be dropped.
-#' 
+#' @param X Matrix of n by m, it can have NA's in it, columns should be named.
+#' @param Y Matrix of n by p, rows are in the same order of with the rows of X.
+#' @param v.X.min Minimum variance for the columns of X, columns with smaller variances will be dropped.
+#' @param n.min Minimum number of finite pairs between columns of X and Y, column pairs not satisfying this condition will be dropped.
 #'
-#' @return A data frame with: x (corresponding column of X), y (corresponding column of Y), correlation_coeff (Pearson correlation), 
-#'         regression_coeff (regression coefficient), p_val / q_val (homoskedastic p-value / q-value),
-#'         n (number of non-na samples), rank (rank of the significance for each column of Y), 
-#
+#' @return A dataframe containing the correlation coefficient, p-value, q-value, rank, and variable variances for each valid column pair.
 #' @export
-#'
-#' @examples
-#'
 linear_model <- function(X, Y, v.X.min = 0.0025, n.min = 100) {
   require(tidyverse)
-  require(magrittr)
   require(matrixStats)
   require(WGCNA)
   
+  # Extremely fast matrix-to-dataframe conversion (Replaces reshape2::melt)
+  cor_res <- WGCNA::corAndPvalue(X, Y, use = "p")
   
-  cor.table <- WGCNA::corAndPvalue(X,Y, use = "p")[c(1,2,5)] %>%
-    reshape2::melt() %>% 
-    tidyr::pivot_wider(names_from = L1, values_from = value) %>% 
-    dplyr::filter(nObs >= n.min) %>% 
-    dplyr::mutate(x = as.character(Var1), y= as.character(Var2)) %>% 
-    dplyr::select(-Var1, -Var2) %>%
-    dplyr::rename(correlation_coef = cor, p_val = p, n = nObs) 
+  cor.table <- tibble::tibble(
+    x = rep(rownames(cor_res$cor), times = ncol(cor_res$cor)),
+    y = rep(colnames(cor_res$cor), each = nrow(cor_res$cor)),
+    correlation_coef = as.vector(cor_res$cor),
+    p_val = as.vector(cor_res$p),
+    n = as.vector(cor_res$nObs)
+  ) %>% 
+    dplyr::filter(n >= n.min)
   
   
-  masks <- is.finite(Y)
-  masks <- masks[, !duplicated(t(masks)), drop = F]
-  colnames(masks) <- paste0("m", 1:dim(masks)[2])
+  # Variance map for Y
+  masks_Y <- is.finite(Y)
+  masks_Y <- masks_Y[, !duplicated(t(masks_Y)), drop = FALSE]
+  colnames(masks_Y) <- paste0("m", seq_len(ncol(masks_Y)))
   
-  map <- apply(masks, 2, function(m) apply(is.finite(Y) == m, 2, all)) %>% 
-    apply(1, which.max)
-  map <- tibble(y = names(map),
-                m = colnames(masks)[map])
-  masks[masks == 0] = NA
-  vX <- apply(masks, 2, function(m) colVars(X * m, na.rm = T))
-  vX <- vX[,map$m]
-  colnames(vX) <- map$y
+  map_Y <- apply(masks_Y, 2, function(m) apply(is.finite(Y) == m, 2, all)) %>% apply(1, which.max)
+  map_Y_df <- tibble::tibble(y = names(map_Y), m = colnames(masks_Y)[map_Y])
   
-  masks <- is.finite(X)
-  masks <- masks[, !duplicated(t(masks)), drop = F]
-  colnames(masks) <- paste0("m", 1:dim(masks)[2])
-  map <- apply(masks, 2, function(m) apply(is.finite(X) == m, 2, all)) %>% 
-    apply(1, which.max)
-  map <- tibble(x = names(map),
-                m = colnames(masks)[map])
-  masks[masks == 0] = NA
-  vY <- apply(masks, 2, function(m) colVars(Y * m, na.rm = T))
-  vY <- vY[,map$m, drop = F]
-  colnames(vY) <- map$x
+  masks_Y[!masks_Y] <- NA
+  vX <- apply(masks_Y, 2, function(m) matrixStats::colVars(X * m, na.rm = TRUE))
+  vX <- vX[, map_Y_df$m, drop = FALSE]
+  colnames(vX) <- map_Y_df$y
   
-  cor.table %<>% 
-    dplyr::left_join(vX %>% 
-                       reshape2::melt() %>% 
-                       dplyr::mutate(x = as.character(Var1), y = as.character(Var2)) %>% 
-                       dplyr::rename(var.x = value)  %>% 
-                       dplyr::select(x,y, var.x)) %>% 
-    dplyr::left_join(vY %>% 
-                       reshape2::melt() %>% 
-                       dplyr::mutate(y = as.character(Var1), x = as.character(Var2)) %>% 
-                       dplyr::rename(var.y = value)  %>% 
-                       dplyr::select(x,y, var.y)) %>% 
+  # Variance map for X
+  masks_X <- is.finite(X)
+  masks_X <- masks_X[, !duplicated(t(masks_X)), drop = FALSE]
+  colnames(masks_X) <- paste0("m", seq_len(ncol(masks_X)))
+  
+  map_X <- apply(masks_X, 2, function(m) apply(is.finite(X) == m, 2, all)) %>% apply(1, which.max)
+  map_X_df <- tibble::tibble(x = names(map_X), m = colnames(masks_X)[map_X])
+  
+  masks_X[!masks_X] <- NA
+  vY <- apply(masks_X, 2, function(m) matrixStats::colVars(Y * m, na.rm = TRUE))
+  vY <- vY[, map_X_df$m, drop = FALSE]
+  colnames(vY) <- map_X_df$x
+  
+  # Helper to melt variance matrices cleanly
+  melt_var <- function(mat, val_name, col1, col2) {
+    as.data.frame(as.table(mat), stringsAsFactors = FALSE) %>%
+      stats::setNames(c(col1, col2, val_name))
+  }
+  
+  cor.table <- cor.table %>% 
+    dplyr::left_join(melt_var(vX, "var.x", "x", "y"), by = c("x", "y")) %>% 
+    dplyr::left_join(melt_var(vY, "var.y", "y", "x"), by = c("x", "y")) %>% 
     dplyr::mutate(regression_coef = correlation_coef * sqrt(var.y) / sqrt(var.x)) %>% 
-    dplyr::filter( n >= n.min, var.x >= v.X.min)
+    dplyr::filter(n >= n.min, var.x >= v.X.min)
   
-  if(nrow(cor.table) > 0 ){
-    cor.table %<>% 
+  if (nrow(cor.table) > 0) {
+    cor.table <- cor.table %>% 
       dplyr::group_by(y) %>% 
-      dplyr::mutate(q_val = p.adjust(p_val, method = "BH")) %>% 
-      dplyr::arrange(q_val) %>% dplyr::mutate(rank = 1:n()) %>%
-      dplyr::group_by(y, q_val) %>% dplyr::mutate(rank = min(rank, na.rm = T)) %>% 
+      dplyr::mutate(
+        q_val = p.adjust(p_val, method = "BH"),
+        rank = dplyr::min_rank(q_val) 
+      ) %>% 
       dplyr::ungroup() %>%
-      dplyr::select(x,y,correlation_coef, regression_coef, q_val, rank, p_val, n, var.x, var.y)
-    
+      dplyr::select(x, y, correlation_coef, regression_coef, q_val, rank, p_val, n, var.x, var.y)
   }
   
   return(cor.table) 
 }
 
 
-
-#' Exports individual datasets from depmap_datasets.h5 file. You can specify the row names either as ccle_names or depmap_ids.
+#' Exports individual datasets from depmap_datasets.h5 file.
 #'
-#' @param file : Please point out to the downloaded depmap_datasets.h5 file.
-#' @param dataset : The dataset you want to export. You can check the available datasets with substr(setdiff(rhdf5::h5ls(file)$group, "/"),2,100)
-#' @param rownames_depmap_ids : Default TRUE, you can get the rownames as ccle_names by switching to FALSE.
+#' @param file Please point out to the downloaded depmap_datasets.h5 file.
+#' @param dataset The dataset you want to export.
+#' @param rownames_depmap_ids Default TRUE, you can get the rownames as ccle_names by switching to FALSE.
 #'
-#' @return The requested data matrix.
+#' @return The requested data matrix with cleaned row and column names.
 #' @export
-#'
-#' @examples
 read_dataset <- function(file = '/data/biomarker/current/depmap_datasets_public.h5', dataset, rownames_depmap_ids = TRUE) {
   require(rhdf5)
-  if(word(file, sep = fixed("://")) %in% c("s3", "http", "https")){
-    s3 = TRUE
-    print(paste0("Reading ", file, " from S3"))
-  } else{
-    s3 = FALSE
-    print(paste0("Reading ", file, " from local"))
-  }
-  X <- h5read(file, name = paste0(dataset, "/mat"), s3 = s3)
-  row_meta <- h5read(file, name = paste0(dataset, "/row_meta"), s3 = s3)
-  column_meta <- h5read(file, name = paste0(dataset, "/column_meta"), s3 = s3)
-  colnames(X) <- column_meta$column_name
-  if(rownames_depmap_ids){
-    rownames(X) <- row_meta$ModelID
-  }else{
-    rownames(X) <- row_meta$CCLEName
-  }
   
+  # Cleaner check for S3 vs Local
+  is_s3 <- grepl("^(s3|http|https)://", file)
+  message("Reading ", file, if(is_s3) " from S3" else " from local")
+  
+  X <- h5read(file, name = paste0(dataset, "/mat"), s3 = is_s3)
+  row_meta <- h5read(file, name = paste0(dataset, "/row_meta"), s3 = is_s3)
+  column_meta <- h5read(file, name = paste0(dataset, "/column_meta"), s3 = is_s3)
+  
+  colnames(X) <- column_meta$column_name
+  rownames(X) <- if(rownames_depmap_ids) row_meta$ModelID else row_meta$CCLEName
+  
+  # Filter missing dimensions
   X <- X[rownames(X) != "NA", colnames(X) != "NA", drop = FALSE]
   X <- X[!duplicated(rownames(X)), !duplicated(colnames(X)), drop = FALSE]
+  
   return(X)
 }
 
 
-
-
-
-
-#' Title
+#' Extracts target recovery biomarkers and classifies their correlations.
 #'
-#' @param Y 
-#' @param file 
-#' @param compound_annotations 
-#' @param features 
-#' @param rank.max 
+#' @param Y Matrix n x m, make sure rownames are depmap_id's and columns are named.
+#' @param file Path to the downloaded depmap_datasets.h5 file.
+#' @param compound_annotations Dataframe containing prior knowledge target mappings.
+#' @param features Character vector of feature sets to evaluate.
+#' @param rank.max Maximum rank limit for univariate feature inclusion.
+#' @param q.max Maximum q-value limit for univariate feature inclusion.
+#' @param n.min Minimum number of overlapping samples.
 #'
-#' @returns
+#' @return A dataframe with features classified into Target, Target-Correlate, Lineage-Correlate, or Other.
 #' @export
-#'
-#' @examples
-target_recovery <- function(Y, file, compound_annotations,  features = c("CRISPR", "RNAi",  "Expression", "Mutation", "CopyNumber",  "Fusion",  "Lineage",   "Repurposing.Primary"), rank.max = 100, q.max = 0.1, n.min = 250) {
+target_recovery <- function(Y, file, compound_annotations, features = c("CRISPR", "RNAi", "Expression", "Mutation", "CopyNumber", "Fusion", "Lineage", "Repurposing.Primary"), rank.max = 100, q.max = 0.1, n.min = 250) {
   require(tidyverse)
-  require(magrittr)
   
-  # Compute the univariate biomarkers
-  bm <- univariate_biomarker_table(Y, file , features = features, 
-                                          rank.max = rank.max, q_val_max = q.max, n.X.min = n.min)
+
   
-  if (nrow(bm) > 0) {
-    bm %<>% dplyr::mutate(cn = word(y, 1,2, sep = fixed("::")))
+  # ---------------------------------------------------------
+  # HELPER: Calculate Partial Correlation
+  # ---------------------------------------------------------
+  calc_partial_cor <- function(cor_xy, cor_xz, cor_yz) {
+    numerator <- cor_xy - (cor_xz * cor_yz)
+    denominator <- sqrt(1 - cor_yz^2) * sqrt(1 - cor_xz^2)
+    return(numerator / denominator)
   }
   
+  # ---------------------------------------------------------
+  # PHASE 1: Compute Initial Univariate Biomarkers
+  # ---------------------------------------------------------
+  bm <- univariate_biomarker_table(
+    Y, file, features = features, 
+    rank.max = rank.max, q_val_max = q.max, n.X.min = n.min
+  )
   
-  # Mapping features into gene symbols
-  feats <- bm %>%
+  if (nrow(bm) > 0) {
+    bm <- bm %>% dplyr::mutate(cn = stringr::word(y, 1, 2, sep = stringr::fixed("::")))
+  }
+  
+  # ---------------------------------------------------------
+  # PHASE 2: Map Features to Gene Symbols
+  # ---------------------------------------------------------
+
+  
+  feature_gene_map <- bm %>%
     dplyr::distinct(feature) %>%
-    dplyr::mutate(feature2 = word(feature, sep = fixed("."))) %>%
     dplyr::mutate(
-      feature3 = word(feature2, sep = fixed("--")),
-      feature4 = word(feature2, 2, sep = fixed("--"))
+      feature2 = stringr::word(feature, sep = stringr::fixed(".")),
+      feature3 = stringr::word(feature2, sep = stringr::fixed("--")),
+      feature4 = stringr::word(feature2, 2, sep = stringr::fixed("--"))
     ) %>%
-    tidyr::pivot_longer(c("feature2", "feature3", "feature4"),
-                        names_to = "dummy",
-                        values_to = "GeneSymbolOfTargets") %>%
+    tidyr::pivot_longer(
+      cols = c(feature2, feature3, feature4),
+      names_to = "dummy",
+      values_to = "GeneSymbolOfTargets"
+    ) %>%
     dplyr::select(-dummy) %>%
     tidyr::drop_na() %>%
     dplyr::distinct()
   
-  # Highlight the targets 
+  # ---------------------------------------------------------
+  # PHASE 3: Annotate Known Drug Targets
+  # ---------------------------------------------------------
   bm <- compound_annotations %>%
     dplyr::distinct(cn, GeneSymbolOfTargets) %>%
     tidyr::separate_rows(GeneSymbolOfTargets, sep = ";") %>%
     tidyr::drop_na() %>% 
     dplyr::distinct() %>% 
-    dplyr::inner_join(feats) %>% 
+    dplyr::inner_join(feature_gene_map, by = "GeneSymbolOfTargets") %>% 
     dplyr::select(-GeneSymbolOfTargets) %>%
     dplyr::distinct() %>% 
     dplyr::mutate(is.target = TRUE) %>%
-    dplyr::right_join(bm)
+    dplyr::right_join(bm, by = c("cn", "feature"))
   
+  # Distinct list of features to process
+  feats_to_process <- bm %>% dplyr::distinct(feature, feature_set, is.target, cn)
   
-  feats <- bm %>%
-    dplyr::distinct(feature, feature_set, is.target, cn)
+  # ---------------------------------------------------------
+  # PHASE 4: Load Lineage Matrix
+  # ---------------------------------------------------------
+  mat_lineage <- read_dataset(file, "Lineage")
+  cl_common <- intersect(rownames(mat_lineage), rownames(Y))
+  mat_lineage <- mat_lineage[cl_common, , drop = FALSE]
   
-  # Read the lineage matrix
-  L <- read_dataset(file, "Lineage")
-  cl = intersect(rownames(L), rownames(Y))
-  L <- L[cl, ]
+  # ---------------------------------------------------------
+  # PHASE 5: Loop Over Each Feature Set to Calculate Partial Correlations
+  # ---------------------------------------------------------
+  results_list <- list()
   
-  
-  res <- list()
-  ix <- 1
-  for (feat in  unique(feats$feature_set)) {
-    Z <- read_dataset(file, feat)
-    cl = intersect(rownames(Z), rownames(Y))
-    Z <- Z[cl, ]
+  for (current_feat_set in unique(feats_to_process$feature_set)) {
     
-    # all the target features
-    a <- feats %>%
-      dplyr::filter(is.target) %>%
-      dplyr::distinct(feature_set, feature)
+    # Load current feature matrix
+    mat_current <- read_dataset(file, current_feat_set)
+    cl_current <- intersect(rownames(mat_current), rownames(Y))
+    mat_current <- mat_current[cl_current, , drop = FALSE]
     
-    # features in feat
-    b <- feats %>%
-      dplyr::filter(feature_set == feat) %>%
-      .$feature %>% unique() %>% as.character()
+    # Separate known targets from current features
+    target_feats_df <- feats_to_process %>% dplyr::filter(is.target) %>% dplyr::distinct(feature_set, feature)
+    current_feats_vec <- feats_to_process %>% dplyr::filter(feature_set == current_feat_set) %>% dplyr::pull(feature) %>% unique() %>% as.character()
     
-    # for each feature in a, compute the correlations with each feature of b in Z
-    if (nrow(a) > 0) {
-      cors <- list()
-      kx <- 1
-      for (ff in unique(a$feature_set)) {
-        Z2 <- read_dataset(file, ff)
-        cll = intersect(cl, rownames(Z2))
-        Z2 <- Z2[cll, ]
-        a2 <- dplyr::filter(a, feature_set == ff)$feature %>% unique %>% as.character()
+    # Filter base biomarker table for the current loop
+    current_results <- bm %>% dplyr::filter(feature_set == current_feat_set)
+    
+    # --- 5A: Account for Target Confounding ---
+    if (nrow(target_feats_df) > 0) {
+      target_cors_list <- list()
+      
+      # Calculate correlation between target features and current features
+      for (tgt_feat_set in unique(target_feats_df$feature_set)) {
+        mat_target <- read_dataset(file, tgt_feat_set)
+        cl_tgt <- intersect(cl_current, rownames(mat_target))
         
-        cors[[kx]] <- WGCNA::cor(Z2[, a2, drop = F], Z[cll, b, drop = F], use = "p") %>%
-          reshape2::melt()  %>%
-          dplyr::rename(
-            target = Var1,
-            feature = Var2,
-            feature_target.cor = value
-          ) %>%
+        tgt_feats_vec <- target_feats_df %>% dplyr::filter(feature_set == tgt_feat_set) %>% dplyr::pull(feature) %>% unique() %>% as.character()
+        
+        cor_mat <- WGCNA::cor(mat_target[cl_tgt, tgt_feats_vec, drop = FALSE], 
+                              mat_current[cl_tgt, current_feats_vec, drop = FALSE], use = "p")
+        
+        target_cors_list[[tgt_feat_set]] <- as.data.frame(as.table(cor_mat), stringsAsFactors = FALSE) %>%
+          stats::setNames(c("target", "feature", "feature_target.cor")) %>%
           dplyr::mutate(
-            feature_set_target = ff,
+            feature_set_target = tgt_feat_set,
             target = as.character(target),
             feature = as.character(feature)
-          ) %>%
-          as_tibble()
-        
-        kx <- kx + 1
+          ) %>% 
+          tibble::as_tibble()
       }
       
-      cors %<>%
-        dplyr::bind_rows()
-      
+      # Merge target correlations into the results
       tars2 <- bm %>%
         dplyr::filter(is.target) %>%
-        dplyr::rename(
-          target = feature,
-          target.cor = correlation_coef,
-          feature_set_target = feature_set
-        ) %>%
-        dplyr::left_join(cors) %>%
-        dplyr::distinct(
-          cn,
-          target,
-          feature,
-          target.cor,
-          feature_target.cor,
-          feature_set_target
-        ) %>%
-        dplyr::mutate(feature_set = feat)
+        dplyr::rename(target = feature, target.cor = correlation_coef, feature_set_target = feature_set) %>%
+        dplyr::left_join(dplyr::bind_rows(target_cors_list), by = c("target", "feature_set_target"), relationship = "many-to-many") %>%
+        dplyr::distinct(cn, target, feature, target.cor, feature_target.cor, feature_set_target) %>%
+        dplyr::mutate(feature_set = current_feat_set)
       
-      temp <- bm %>%
-        dplyr::filter(feature_set == feat) %>%
-        dplyr::left_join(tars2) %>%
-        dplyr::mutate(target.cor = ifelse(is.na(target.cor), 0 , target.cor)) %>%
+      current_results <- current_results %>%
+        dplyr::left_join(tars2, by = c("cn", "feature", "feature_set")) %>%
         dplyr::mutate(
-          target_part_cor_coef = (correlation_coef - feature_target.cor * target.cor) / sqrt(1 - target.cor^2) / sqrt(1 - feature_target.cor^2)
+          target.cor = tidyr::replace_na(target.cor, 0),
+          target_part_cor_coef = calc_partial_cor(correlation_coef, feature_target.cor, target.cor)
         ) %>%
         dplyr::group_by(cn, y, feature, feature_set) %>%
         dplyr::arrange(target_part_cor_coef^2 * (1 - target.cor^2), target) %>%
-        dplyr::mutate(dix = 1:n()) %>%
-        dplyr::ungroup() %>%
-        dplyr::filter(dix == 1) %>%
-        dplyr::select(-dix)
-      
-    } else{
-      temp <- bm %>%
-        dplyr::filter(feature_set == feat)
+        dplyr::slice(1) %>% 
+        dplyr::ungroup()
     }
     
+    # --- 5B: Account for Lineage Confounding ---
+    cl_lineage <- intersect(rownames(mat_current), rownames(mat_lineage))
+    l_cor_mat <- WGCNA::cor(mat_lineage[cl_lineage, , drop = FALSE], 
+                            mat_current[cl_lineage, current_feats_vec, drop = FALSE], use = "p")
     
-    # lineage correlations for each b in Z
-    cl <- intersect(rownames(Z), rownames(L))
-    l.cor <- WGCNA::cor(L[cl, , drop = F], Z[cl, b, drop = F], use = "p") %>%
-      reshape2::melt() %>%
-      dplyr::rename(
-        lineage = Var1,
-        feature = Var2,
-        feature_lineage.cor = value
-      ) %>%
-      dplyr::mutate(lineage = as.character(lineage),
-                    feature = as.character(feature)) %>%
-      as_tibble()
+    lineage_cor_df <- as.data.frame(as.table(l_cor_mat), stringsAsFactors = FALSE) %>%
+      stats::setNames(c("lineage", "feature", "feature_lineage.cor")) %>%
+      dplyr::mutate(lineage = as.character(lineage), feature = as.character(feature)) %>% 
+      tibble::as_tibble()
     
     tars3 <- bm %>%
       dplyr::filter(feature_set == "Lineage") %>%
       dplyr::rename(lineage = feature, lineage.cor = correlation_coef) %>%
-      dplyr::left_join(l.cor) %>%
-      dplyr::distinct(cn,
-                      lineage,
-                      feature,
-                      lineage.cor,
-                      feature_lineage.cor) %>%
-      dplyr::mutate(feature_set = feat)
+      dplyr::left_join(lineage_cor_df, by = "lineage", relationship = "many-to-many") %>%
+      dplyr::distinct(cn, lineage, feature, lineage.cor, feature_lineage.cor) %>%
+      dplyr::mutate(feature_set = current_feat_set)
     
-    
-    
-    temp <- temp %>%
-      dplyr::left_join(tars3) %>%
-      dplyr::mutate( lineage_part_cor_coef = (correlation_coef - feature_lineage.cor * lineage.cor) / sqrt(1 - lineage.cor^2) / sqrt(1 - feature_lineage.cor^2)) %>%
+    # Calculate lineage partial correlation and finalize loop results
+    current_results <- current_results %>%
+      dplyr::left_join(tars3, by = c("cn", "feature", "feature_set")) %>%
+      dplyr::mutate(
+        lineage_part_cor_coef = calc_partial_cor(correlation_coef, feature_lineage.cor, lineage.cor)
+      ) %>%
       dplyr::group_by(cn, y, feature, feature_set) %>%
       dplyr::arrange(lineage_part_cor_coef^2 * (1 - lineage.cor^2), lineage) %>%
-      dplyr::mutate(dix = 1:n()) %>%
+      dplyr::slice(1) %>% 
       dplyr::ungroup() %>%
-      dplyr::filter(dix == 1) %>%
-      dplyr::select(-dix) %>%
       dplyr::mutate(is.target = !is.na(is.target))
-    res[[ix]] <- temp
     
-    ix <- ix + 1
+    results_list[[current_feat_set]] <- current_results
   }
   
-  res <- dplyr::bind_rows(res) %>%
-    dplyr::mutate(target_part_cor_coef = ifelse(is.na(target_part_cor_coef), correlation_coef, target_part_cor_coef),
-                  target.cor = ifelse(is.na(target.cor), 0, target.cor),
-                  lineage_part_cor_coef = ifelse(is.na(lineage_part_cor_coef), correlation_coef, lineage_part_cor_coef),
-                  lineage.cor = ifelse(is.na(lineage.cor), 0, lineage.cor),
-                  tf = (1 - target.cor^2)*target_part_cor_coef^2 / correlation_coef^2,
-                  lf = (1 - lineage.cor^2)*lineage_part_cor_coef^2 / correlation_coef^2) %>%
-    dplyr::mutate(status = ifelse(is.target, "Target", ifelse(tf < 0.5, "Target-Correlate", ifelse(lf < 0.5, "Lineage-Correlate", "Other")))) %>%
-    dplyr::left_join(compound_annotations)
   
-  return(res)
+  # ---------------------------------------------------------
+  # PHASE 6: Final Status Classification
+  # ---------------------------------------------------------
+  final_res <- dplyr::bind_rows(results_list) %>%
+    dplyr::rowwise() %>% 
+    dplyr::mutate(
+      target_part_cor_coef  = tidyr::replace_na(target_part_cor_coef, correlation_coef),
+      target.cor            = tidyr::replace_na(target.cor, 0),
+      lineage_part_cor_coef = tidyr::replace_na(lineage_part_cor_coef, correlation_coef),
+      lineage.cor           = tidyr::replace_na(lineage.cor, 0),
+      
+      # Calculate variance fractions
+      target_var_fraction   = (1 - target.cor^2) * target_part_cor_coef^2 / correlation_coef^2,
+      lineage_var_fraction  = (1 - lineage.cor^2) * lineage_part_cor_coef^2 / correlation_coef^2
+    ) %>%
+    dplyr::mutate(
+      status = dplyr::case_when(
+        is.target ~ "Target",
+        target_var_fraction < 0.5 ~ "Target-Correlate",
+        lineage_var_fraction < 0.5 ~ "Lineage-Correlate",
+        TRUE ~ "Other"
+      )
+    ) %>%
+    dplyr::ungroup() %>% 
+    dplyr::left_join(compound_annotations, by = "cn")
+  
+  return(final_res)
 }
-
-
-
-biomarker_suite_rf <- function(X, Y, biomarker_file, CompoundList, test_samples = NULL, bm_th = 0.05, bm_R = 10,  bm_R2 = 50, features =c("CRISPR", "RNAi", "Expression", "Mutation", "CopyNumber", "Fusion", "Lineage")){
-  require(tidyverse)
-  require(ranger)
-  
-  train <- setdiff(rownames(Y), test_samples) %>% intersect(rownames(X))
-  test <- intersect(rownames(Y), test_samples) %>% intersect(rownames(X))
-  
-  bm.auc <- target_recovery(Y[train,, drop = F], biomarker_file, CompoundList, features = features) #, rc = F, q.max = 1, rank.max = 100000)
-  
-  targets <- CompoundList %>% 
-    dplyr::distinct(cn, CompoundName,GeneSymbolOfTargets) %>% 
-    tidyr::separate_rows(GeneSymbolOfTargets, sep = ";") %>% 
-    dplyr::mutate(GeneSymbolOfTargets = trimws(GeneSymbolOfTargets)) %>% 
-    dplyr::distinct() %>%
-    tidyr::drop_na()
-  
-  
-  
-  targets <- tibble(cn = colnames(X)) %>%  
-    dplyr::mutate(t1 =  word(word(cn, 2, sep = fixed("_")), sep = fixed(".")),
-                  t2 = word(word(cn, 2, sep = fixed("_")), sep = fixed("--")),
-                  t3 = word(word(cn, 2, sep = fixed("_")),-1, sep = fixed("--"))) %>% 
-    tidyr::pivot_longer(c(t1,t2,t3), values_to = "GeneSymbolOfTargets", names_to = "d") %>% 
-    dplyr::filter(GeneSymbolOfTargets != "X", !is.na(GeneSymbolOfTargets)) %>%
-    dplyr::select(-d) %>% 
-    dplyr::distinct() %>% 
-    dplyr::rename(cn.feat = cn) %>% 
-    dplyr::inner_join(targets)
-  
-  
-  selected_features <- bm.auc %>% 
-    dplyr::distinct(cn, CompoundName, feature_set, feature, rank, correlation_coef, q_val, status) %>%
-    dplyr::filter((status == "Other") | (feature_set == "Lineage")) %>% 
-    dplyr::filter(((rank <= bm_R) & (correlation_coef^2 >= bm_th)) | (rank <= 1)) 
-  
-  if(nrow(selected_features) > 0){
-    selected_features <- selected_features %>%
-      dplyr::group_by(cn) %>% 
-      dplyr::arrange(q_val) %>%
-      dplyr::mutate(rank_ = 1:n()) %>% 
-      dplyr::group_by(cn, q_val) %>%
-      dplyr::mutate(rank_ = min(rank_, na.rm = T)) %>% 
-      dplyr::ungroup() %>% 
-      dplyr::filter(rank_ <= bm_R2) %>% 
-      dplyr::ungroup() 
-  }
-  
-  
-  
-  selected_columns <- selected_features %>%
-    dplyr::distinct(cn, CompoundName, feature_set, feature) %>% 
-    dplyr::mutate(tar = ifelse(feature_set %in% c("CRISPR", "RNAi"), paste0(feature_set, "_"), 
-                               ifelse(feature_set == "Expression",  "EXP_", 
-                                      ifelse(feature_set == "CopyNumber",  "CN_" , 
-                                             ifelse(feature_set == "Mutation",  "MUT_" ,
-                                                    ifelse(feature_set == "Fusion",   "FUS_", 
-                                                           ifelse(feature_set == "Lineage", "LIN_" , NA))))))) %>% 
-    dplyr::filter(!is.na(tar)) %>% 
-    dplyr::mutate(y = paste0(tar, feature)) 
-  
-  
-  fit <- function(x,y){
-    require(ranger)
-    cl <- intersect(train, names(y))
-    cl.test <- intersect(test, names(y))
-    
-    rf <- ranger::ranger(x = x[cl, , drop = F], y = y[cl] , importance = "impurity")
-    
-    pr <- predict(rf, data = x[union(cl, cl.test), , drop = F])
-    
-    y.hat <- tibble(depmap_id = union(cl, cl.test), 
-                    y.hat = pr$predictions, y = y[union(cl, cl.test)],
-                    type = ifelse(depmap_id %in% cl, "train", "test")) %>% 
-      dplyr::left_join(tibble(depmap_id = cl, y.hat.oob = rf$predictions))
-    
-    
-    imp <- tibble(var = names(rf$variable.importance), imp = rf$variable.importance) %>%
-      dplyr::arrange(desc(imp))
-    
-    res <- tibble(mse.oob = mean((rf$predictions - y[cl])^2, na.rm = T),
-                  var.y.train = var(y[cl], na.rm = T), 
-                  r2.oob = mse.oob/var.y.train,
-                  r.oob = cor(rf$predictions, y[cl], use = "p")[,1])
-    
-    if(!is.null(test)){
-      res <- y.hat %>% 
-        dplyr::filter(type == "test") %>% 
-        dplyr::summarise(var.y.test = var(y, na.rm = T),
-                         mse = mean((y - y.hat)^2, na.rm = T),
-                         r2 = 1- mse/var.y.test,
-                         r = cor(y, y.hat, use = "p")[,1]) %>%
-        bind_cols(res)
-    }
-    
-    
-    return(list(res, y.hat, imp))
-  }
-  
-  
-  biomarker_table <- list(); prediction_table <- list(); importance_table <- list(); jx <- 1
-  for(cmp in colnames(Y)){
-    tars <- dplyr::filter(targets, cn == cmp)$GeneSymbolOfTargets %>% unique()
-    extras <- dplyr::filter(selected_columns , cn == cmp)$y %>% intersect(colnames(X))
-    
-    y <- Y[, cmp]; y <- y[is.finite(y)]
-    res <- list();    pred <- list(); imp <- list(); ix <- 1 
-    
-    if(length(tars) > 0){
-      # fit a model for each target
-      for(tar in tars){
-        
-        x <- X[names(y), unique(dplyr::filter(targets, cn == cmp, GeneSymbolOfTargets == tar)$cn.feat), drop = F]
-        temp <- fit(x,y)
-        
-        res[[ix]] <-  temp[[1]] %>% 
-          dplyr::mutate(model = tar)
-        
-        pred[[ix]] <- temp[[2]] %>% 
-          dplyr::mutate(model = tar)
-        
-        imp[[ix]] <- temp[[3]] %>% 
-          dplyr::mutate(model = tar)
-        
-        ix <- ix + 1
-      }
-      
-      # fit all the targets together
-      x <- X[names(y), unique(dplyr::filter(targets, cn == cmp, GeneSymbolOfTargets %in% tars)$cn.feat), drop = F]
-      temp <- fit(x,y)
-      
-      res[[ix]] <-  temp[[1]] %>% 
-        dplyr::mutate(model = "targets")
-      
-      pred[[ix]] <- temp[[2]] %>% 
-        dplyr::mutate(model = "targets")
-      
-      imp[[ix]] <- temp[[3]] %>% 
-        dplyr::mutate(model = "targets")
-      
-      ix <- ix + 1
-    }
-    
-    cols <- unique(union(dplyr::filter(targets, cn == cmp, GeneSymbolOfTargets %in% tars)$cn.feat, extras))
-    if(length(cols) > 0){
-      # fit the extended model
-      x <- X[names(y), cols, drop = F]
-      
-      temp <- fit(x,y)
-      
-      res[[ix]] <-  temp[[1]] %>% 
-        dplyr::mutate(model = "extended")
-      
-      pred[[ix]] <- temp[[2]] %>% 
-        dplyr::mutate(model = "extended")
-      
-      imp[[ix]] <- temp[[3]] %>% 
-        dplyr::mutate(model = "extended")
-      
-      
-    }
-    
-    # put them all together
-    biomarker_table[[jx]] <- res %>% 
-      dplyr::bind_rows() %>% 
-      dplyr::mutate(cn = cmp)
-    
-    prediction_table[[jx]] <- pred %>% 
-      dplyr::bind_rows() %>% 
-      dplyr::mutate(cn = cmp)
-    
-    importance_table[[jx]] <- imp %>% 
-      dplyr::bind_rows() %>% 
-      dplyr::mutate(cn = cmp)
-    
-    print(paste0(cmp, " - ", jx))
-    jx <- jx + 1
-  }
-  
-  return(list(dplyr::bind_rows(biomarker_table) %>% 
-                dplyr::left_join(CompoundList %>% dplyr::distinct(cn, CompoundName)), 
-              dplyr::bind_rows(prediction_table) %>% 
-                dplyr::left_join(CompoundList %>% dplyr::distinct(cn, CompoundName)), 
-              dplyr::bind_rows(importance_table) %>% 
-                dplyr::left_join(CompoundList %>% dplyr::distinct(cn, CompoundName)), 
-              bm.auc))
-}
-
-
-biomarker_suite_rf_cv <- function(X, Y, biomarker_file, CompoundList, bm_th = 0.05, bm_R = 10, bm_R2 = 50, K = 10, seed = NULL){
-  require(tidyverse)
-  
-  if(!is.null(seed)) set.seed(seed)
-  
-  cl <- intersect(rownames(X), rownames(Y)) %>% sample()
-  RES <- list(); PRED <- list(); IMP <- list()
-  for(k in 1:K){
-    print(k)
-    temp <- biomarker_suite_rf(X, Y, biomarker_file = biomarker_file, CompoundList = CompoundList, test_samples = cl[seq.int(k, length(cl), by = K)], bm_th = bm_th, bm_R = bm_R, bm_R2 = bm_R2)
-    
-    RES[[k]] <- temp[[1]] %>% 
-      dplyr::mutate(K = k)
-    
-    PRED[[k]] <- temp[[2]] %>% 
-      dplyr::mutate(K = k)
-    
-    IMP[[k]] <- temp[[3]] %>% 
-      dplyr::mutate(K = k)
-  }
-  
-  temp <- biomarker_suite_rf(X, Y, biomarker_file = biomarker_file, CompoundList = CompoundList, test_samples = NULL, bm_th = bm_th, bm_R = bm_R, bm_R2 = bm_R2)
-  
-  RES[[K + 1]] <- temp[[1]] %>% 
-    dplyr::mutate(K = 0)
-  
-  PRED[[K + 1]] <- temp[[2]] %>% 
-    dplyr::mutate(K = 0)
-  
-  IMP[[K + 1]] <- temp[[3]] %>% 
-    dplyr::mutate(K = 0)
-  
-  
-  return(list(model_performances = dplyr::bind_rows(RES), predictions = dplyr::bind_rows(PRED),  variable_importances = dplyr::bind_rows(IMP), univariate_biomarkers = temp[[4]]))
-}
-
-
-
-
-
-biomarker_suite_rf_target_only <- function(X, Y, biomarker_file, CompoundList, test_samples = NULL, bm_th = 0.05, bm_R = 10,  bm_R2 = 50, features =c("CRISPR", "RNAi", "Expression", "Mutation", "CopyNumber", "Fusion", "Lineage")){
-  require(tidyverse)
-  require(ranger)
-  
-  train <- setdiff(rownames(Y), test_samples) %>% intersect(rownames(X))
-  test <- intersect(rownames(Y), test_samples) %>% intersect(rownames(X))
-
-  
-  targets <- CompoundList %>% 
-    dplyr::distinct(cn, CompoundName,GeneSymbolOfTargets) %>% 
-    tidyr::separate_rows(GeneSymbolOfTargets, sep = ";") %>% 
-    dplyr::mutate(GeneSymbolOfTargets = trimws(GeneSymbolOfTargets)) %>% 
-    dplyr::distinct() %>%
-    tidyr::drop_na()
-  
-  
-  
-  targets <- tibble(cn = colnames(X)) %>%  
-    dplyr::mutate(t1 =  word(word(cn, 2, sep = fixed("_")), sep = fixed(".")),
-                  t2 = word(word(cn, 2, sep = fixed("_")), sep = fixed("--")),
-                  t3 = word(word(cn, 2, sep = fixed("_")),-1, sep = fixed("--"))) %>% 
-    tidyr::pivot_longer(c(t1,t2,t3), values_to = "GeneSymbolOfTargets", names_to = "d") %>% 
-    dplyr::filter(GeneSymbolOfTargets != "X", !is.na(GeneSymbolOfTargets)) %>%
-    dplyr::select(-d) %>% 
-    dplyr::distinct() %>% 
-    dplyr::rename(cn.feat = cn) %>% 
-    dplyr::inner_join(targets)
-  
-  
-  
-  
-  fit <- function(x,y){
-    require(ranger)
-    cl <- intersect(train, names(y))
-    cl.test <- intersect(test, names(y))
-    
-    rf <- ranger::ranger(x = x[cl, , drop = F], y = y[cl] , importance = "impurity")
-    
-    pr <- predict(rf, data = x[union(cl, cl.test), , drop = F])
-    
-    y.hat <- tibble(depmap_id = union(cl, cl.test), 
-                    y.hat = pr$predictions, y = y[union(cl, cl.test)],
-                    type = ifelse(depmap_id %in% cl, "train", "test")) %>% 
-      dplyr::left_join(tibble(depmap_id = cl, y.hat.oob = rf$predictions))
-    
-    
-    imp <- tibble(var = names(rf$variable.importance), imp = rf$variable.importance) %>%
-      dplyr::arrange(desc(imp))
-
-    
-    res <- tibble(mse.oob = mean((rf$predictions - y[cl])^2, na.rm = T),
-                  var.y.train = var(y[cl], na.rm = T), 
-                  r2.oob = mse.oob/var.y.train,
-                  r.oob = cor(rf$predictions, y[cl], use = "p"))
-    
-    if(!is.null(test)){
-      res <- y.hat %>% 
-        dplyr::filter(type == "test") %>% 
-        dplyr::summarise(var.y.test = var(y, na.rm = T),
-                         mse = mean((y - y.hat)^2, na.rm = T),
-                         r2 = 1- mse/var.y.test,
-                         r = cor(y, y.hat, use = "p")) %>%
-        bind_cols(res)
-    }
-    
-    
-    return(list(res, y.hat, imp))
-  }
-  
-  
-  biomarker_table <- list(); prediction_table <- list(); importance_table <- list(); jx <- 1
-  for(cmp in colnames(Y)){
-    tars <- dplyr::filter(targets, cn == cmp)$GeneSymbolOfTargets %>% unique()
-    
-    y <- Y[, cmp]; y <- y[is.finite(y)]
-    res <- list();    pred <- list(); imp <- list(); ix <- 1 
-    
-    if(length(tars) > 0){
-      # fit a model for each target
-      for(tar in tars){
-        
-        x <- X[names(y), unique(dplyr::filter(targets, cn == cmp, GeneSymbolOfTargets == tar)$cn.feat), drop = F]
-        temp <- fit(x,y)
-        
-        res[[ix]] <-  temp[[1]] %>% 
-          dplyr::mutate(model = tar)
-        
-        pred[[ix]] <- temp[[2]] %>% 
-          dplyr::mutate(model = tar)
-        
-        imp[[ix]] <- temp[[3]] %>% 
-          dplyr::mutate(model = tar)
-        
-        ix <- ix + 1
-      }
-      
-      # fit all the targets together
-      x <- X[names(y), unique(dplyr::filter(targets, cn == cmp, GeneSymbolOfTargets %in% tars)$cn.feat), drop = F]
-      temp <- fit(x,y)
-      
-      res[[ix]] <-  temp[[1]] %>% 
-        dplyr::mutate(model = "targets")
-      
-      pred[[ix]] <- temp[[2]] %>% 
-        dplyr::mutate(model = "targets")
-      
-      imp[[ix]] <- temp[[3]] %>% 
-        dplyr::mutate(model = "targets")
-      
-      ix <- ix + 1
-    }
-    
-
-    
-    # put them all together
-    biomarker_table[[jx]] <- res %>% 
-      dplyr::bind_rows() %>% 
-      dplyr::mutate(cn = cmp)
-    
-    prediction_table[[jx]] <- pred %>% 
-      dplyr::bind_rows() %>% 
-      dplyr::mutate(cn = cmp)
-    
-    importance_table[[jx]] <- imp %>% 
-      dplyr::bind_rows() %>% 
-      dplyr::mutate(cn = cmp)
-    
-    print(paste0(cmp, " - ", jx))
-    jx <- jx + 1
-  }
-  
-  return(list(dplyr::bind_rows(biomarker_table) %>% 
-                dplyr::left_join(CompoundList %>% dplyr::distinct(cn, CompoundName)), 
-              dplyr::bind_rows(prediction_table) %>% 
-                dplyr::left_join(CompoundList %>% dplyr::distinct(cn, CompoundName)), 
-              dplyr::bind_rows(importance_table) %>% 
-                dplyr::left_join(CompoundList %>% dplyr::distinct(cn, CompoundName))))
-}
-
-biomarker_suite_rf_cv_target_only <- function(X, Y, biomarker_file, CompoundList, bm_th = 0.05, bm_R = 10, bm_R2 = 50, K = 10, seed = NULL){
-  require(tidyverse)
-  
-  if(!is.null(seed)) set.seed(seed)
-  
-  cl <- intersect(rownames(X), rownames(Y)) %>% sample()
-  RES <- list(); PRED <- list(); IMP <- list()
-  for(k in 1:K){
-    print(k)
-    temp <- biomarker_suite_rf_target_only(X, Y, biomarker_file = biomarker_file, CompoundList = CompoundList, test_samples = cl[seq.int(k, length(cl), by = K)], bm_th = bm_th, bm_R = bm_R, bm_R2 = bm_R2)
-    
-    RES[[k]] <- temp[[1]] %>% 
-      dplyr::mutate(K = k)
-    
-    PRED[[k]] <- temp[[2]] %>% 
-      dplyr::mutate(K = k)
-    
-    IMP[[k]] <- temp[[3]] %>% 
-      dplyr::mutate(K = k)
-  }
-  
-  temp <- biomarker_suite_rf_target_only(X, Y, biomarker_file = biomarker_file, CompoundList = CompoundList, test_samples = NULL, bm_th = bm_th, bm_R = bm_R, bm_R2 = bm_R2)
-  
-  RES[[K + 1]] <- temp[[1]] %>% 
-    dplyr::mutate(K = 0)
-  
-  PRED[[K + 1]] <- temp[[2]] %>% 
-    dplyr::mutate(K = 0)
-  
-  IMP[[K + 1]] <- temp[[3]] %>% 
-    dplyr::mutate(K = 0)
-  
-  
-  return(list(model_performances = dplyr::bind_rows(RES), predictions = dplyr::bind_rows(PRED),  variable_importances = dplyr::bind_rows(IMP)))
-}
-
-
 
 
 # Data processing -----
 
 
-#' Fitting a dose response curve to the given dose and viability (FC) values.
-#' This function fits 5 different dose-response functiosn to the given dose, viability pairs using dr4pl and drc packages and returns
-#' the best one (lowest mse) among them.
+#' Fits a dose response curve to the given dose and viability (FC) values.
+#' This function fits 5 different dose-response functions to the given dose/viability pairs using dr4pl and drc packages and returns the best one (lowest mse).
 #'
-#' @param FC : Measured viability vector
-#' @param dose : Dose vector corresponding to FC
-#' @param UL_low : Lower limit for the upper asymptote
-#' @param UL_up : Upper limit for the upper asympotote
-#' @param slope_decreasing: Should the curve to be constrained to be decreasing or not.
+#' @param FC Measured viability vector.
+#' @param dose Dose vector corresponding to FC.
+#' @param UL_low Lower limit for the upper asymptote, default is 0.8.
+#' @param UL_up Upper limit for the upper asymptote, default is 1.01.
+#' @param slope_decreasing Should the curve be constrained to be decreasing or not, default is TRUE.
+#' @param seed Random seed for replicability.
 #'
-#' @return Returns a single row data-frame with following columns:
-#'          fit_name : Name of the fitting method with the highest explained variance (lowest mse)
-#'          lower_limit : Lower asmpytote for the selected fit
-#'          upper_limit : Upper asymptote for the selected fit
-#'          slope : The Hill slope for the selected fit
-#'          inflection : inflection point of the selected fit (EC50)
-#'          mse : mse of the selected fit
-#'          mad : mad of the selected fit
-#'          frac_var_explained : Explained variance for the best fit
-#'          successful_fit: If any of the fitting methods has positive frac_var_explained
-#'          auc_riemann : The average measured viability value across doses
-#'          minimum_dose : Minimum measured dose
-#'          maximum_dose : Maximum measured dose
-#'          auc : auc of the log-dose vs viability curve normalized to the measured dose-range (takes values between 0 and 1)
-#'          log2_ic50 : Log2 of IC50 for the fitted curve
+#' @return Returns a single-row dataframe detailing the parameters and statistics of the best-fitting curve.
 #' @export
-#'
-#' @examples
-get_best_fit <- function(FC, dose, UL_low=0.8, UL_up=1.01, slope_decreasing=TRUE, seed = NULL) {
+get_best_fit <- function(FC, dose, UL_low = 0.8, UL_up = 1.01, slope_decreasing = TRUE, seed = NULL) {
   require(dr4pl)
   require(drc)
   require(tidyverse)
-  require(magrittr)
   
   if(!is.null(seed)) set.seed(seed)
   
-  # Fits a number of alternate models  to the DRC and chooses the best fit.
-  
-  # UL low is the lowerbound of UL we pass to the optimizer and UL_up is the upper bound of UL that we pass to the optimizer
-  # fomat of output will be:-
-  # results.df <- data.frame("fit_name"=character(),
-  #                          "lower_limit"=double(),
-  #                          "upper_limit"=double(),
-  #                          "slope"=double(),
-  #                          "inflection"=double(),
-  #                          "mse"=double(), "mad" =double(),
-  #                          "frac_var_explained"=double())
-  
   dose = as.numeric(dose)
   FC = as.numeric(FC)
-  slope_bound <- ifelse(slope_decreasing, 1e-5, Inf)  # bound the slopes by default unless passed another option
-  riemann_auc <- mean(pmin(1,FC)) ## mean fold-change after rounding FC to 1.
+  slope_bound <- ifelse(slope_decreasing, 1e-5, Inf)  
+  riemann_auc <- mean(pmin(1, FC)) 
   var_data = var(FC)
   
   minimum_dose = min(dose); maximum_dose = max(dose)
   
   results.df <- list(); ix = 1
   
-  
   # FIT 1 ---
   drc_model <-  tryCatch(drc::drm(FC ~ dose, data= data.frame(FC = FC, dose = dose),
                                   fct=LL.4(names = c("slope", "Lower Limit", "Upper Limit", "ED50")),
-                                  lowerl = c(-slope_bound,0.0, UL_low, -Inf),upperl = c(Inf,1.01,UL_up, Inf)),
-                         error = function(e)
-                         {return(list(convergence=FALSE, error=TRUE,fit=list(convergence=FALSE)))})
-  # "slope" in drc package is -ve of slope in dr4pl package
-  
+                                  lowerl = c(-slope_bound, 0.0, UL_low, -Inf), upperl = c(Inf, 1.01, UL_up, Inf)),
+                         error = function(e) {return(list(convergence=FALSE, error=TRUE,fit=list(convergence=FALSE)))})
   
   if (drc_model$fit$convergence & all(is.finite(unlist(drc_model$coefficients)))){
     mse_mad <- compute_mse_mad(FC, dose, as.numeric(drc_model$coefficients[[3]]), as.numeric(drc_model$coefficients[[2]]),
                                -as.numeric(drc_model$coefficients[[1]]), as.numeric(drc_model$coefficients[[4]]))
-    # "slope" in drc package is -ve of slope in dr4pl package and so -ve sign needs to be put in here.
     
     results.df[[ix]] <- tibble( fit_name = "drc_drm_constrained",
                                 lower_limit = as.numeric(drc_model$coefficients[[2]]),
@@ -878,22 +690,16 @@ get_best_fit <- function(FC, dose, UL_low=0.8, UL_up=1.01, slope_decreasing=TRUE
     ix = ix + 1
   }
   
-  
-  
   # FIT 2 ---
   drc_model <-  tryCatch(drc::drm(FC ~ dose, data= data.frame(FC = FC, dose = dose),
                                   fct=LL.4(names = c("slope", "Lower Limit", "Upper Limit", "ED50")),
-                                  lowerl = c(-Inf,0.0, UL_low, -Inf),upperl = c(Inf,1.01,UL_up, Inf)),
-                         error = function(e)
-                         {return(list(convergence=FALSE, error=TRUE,fit=list(convergence=FALSE)))})
-  # "slope" in drc package is -ve of slope in dr4pl package
-  
+                                  lowerl = c(-Inf, 0.0, UL_low, -Inf), upperl = c(Inf, 1.01, UL_up, Inf)),
+                         error = function(e) {return(list(convergence=FALSE, error=TRUE,fit=list(convergence=FALSE)))})
   
   if (drc_model$fit$convergence & all(is.finite(unlist(drc_model$coefficients)))){
     if((!slope_decreasing) | (as.numeric(drc_model$coefficients[[1]]) > 0)){
       mse_mad <- compute_mse_mad(FC, dose, as.numeric(drc_model$coefficients[[3]]), as.numeric(drc_model$coefficients[[2]]),
                                  -as.numeric(drc_model$coefficients[[1]]), as.numeric(drc_model$coefficients[[4]]))
-      # "slope" in drc package is -ve of slope in dr4pl package and so -ve sign needs to be put in here.
       
       results.df[[ix]] <- tibble( fit_name = "drc_drm_unconstrained",
                                   lower_limit = as.numeric(drc_model$coefficients[[2]]),
@@ -905,11 +711,9 @@ get_best_fit <- function(FC, dose, UL_low=0.8, UL_up=1.01, slope_decreasing=TRUE
     }
   }
   
-  
   # FIT 3 ---
   dr4pl_initMan_optNM <- tryCatch(dr4pl(dose, FC,
-                                        init.parm = dr4pl::dr4pl_theta(theta_1 = 1, theta_2 = 8*min(dose),
-                                                                       theta_3= -3, theta_4 = 0.01),
+                                        init.parm = dr4pl::dr4pl_theta(theta_1 = 1, theta_2 = 8*min(dose), theta_3= -3, theta_4 = 0.01),
                                         lowerl = c(UL_low, -Inf, -Inf, 0),
                                         upperl = c(UL_up, Inf, slope_bound, 1.01),
                                         method.optim="Nelder-Mead"),
@@ -949,10 +753,9 @@ get_best_fit <- function(FC, dose, UL_low=0.8, UL_up=1.01, slope_decreasing=TRUE
     }
   }
   
-  
   param <- tryCatch(dr4pl_unconstrained$parameters, error = function(e) return(NA))
   if (!all(is.na(param))){
-    if(as.numeric(dr4pl_unconstrained$parameters[[3]])<slope_bound){ ### while slope bound is not passed to this last optimizer, we do not accept a solution not within the bound
+    if(as.numeric(dr4pl_unconstrained$parameters[[3]])<slope_bound){ 
       mse_mad <- compute_mse_mad(FC, dose, dr4pl_unconstrained$parameters[[1]], dr4pl_unconstrained$parameters[[4]],
                                  dr4pl_unconstrained$parameters[[3]], dr4pl_unconstrained$parameters[[2]])
       results.df[[ix]] <- tibble( fit_name = "dr4pl_initL_unconstrained",
@@ -993,7 +796,6 @@ get_best_fit <- function(FC, dose, UL_low=0.8, UL_up=1.01, slope_decreasing=TRUE
     ix = ix + 1
   }
   
-  
   # Choose the best fit among the successful fits---
   results.df <- dplyr::bind_rows(results.df)
   
@@ -1019,20 +821,17 @@ get_best_fit <- function(FC, dose, UL_low=0.8, UL_up=1.01, slope_decreasing=TRUE
 }
 
 
-
-#' Computing area under a 4 parameter log-logistic dose response curve
+#' Computes area under a 4-parameter log-logistic dose response curve.
 #'
-#' @param LL : Lower asymptote
-#' @param UL : Upper asymptote
-#' @param inflection : inflection point (EC50)
-#' @param slope : Hill slope ( > 0 for decreasing curves)
-#' @param minimum_dose : Minimum dose
-#' @param maximum_dose : Maximum dose
+#' @param LL Lower asymptote.
+#' @param UL Upper asymptote.
+#' @param inflection Inflection point (EC50).
+#' @param slope Hill slope (> 0 for decreasing curves).
+#' @param minimum_dose Minimum dose tested.
+#' @param maximum_dose Maximum dose tested.
 #'
-#' @return auc value of the dose-response function (x: log2(dose), y: response) scaled to the dose range.
+#' @return Area under the curve value scaled to the dose range.
 #' @export
-#'
-#' @examples
 compute_auc <- function(LL, UL, inflection, slope, minimum_dose, maximum_dose) {
   f1 = function(x) pmax(pmin((UL + (LL - UL)/(1 + (2^x/inflection)^slope)), 1, na.rm = T), 0, na.rm = T)
   return(tryCatch(integrate(f1, log2(minimum_dose), log2(maximum_dose))$value/(log2(maximum_dose/minimum_dose)),
@@ -1040,46 +839,18 @@ compute_auc <- function(LL, UL, inflection, slope, minimum_dose, maximum_dose) {
 }
 
 
-#' Computing area under a 4 parameter log-logistic dose response curve after tanh scaling
-#'
-#' @param LL : Lower asymptote
-#' @param UL : Upper asymptote
-#' @param inflection : inflection point (EC50)
-#' @param slope : Hill slope ( > 0 for decreasing curves)
-#' @param minimum_dose : Minimum dose
-#' @param maximum_dose : Maximum dose
-#' @param m : mean parameter for the transformation
-#' @param s : spread parameter for the transformation
-#'
-#' @return auc value of the dose-response function (x: log2(dose), y: response) scaled to the dose range.
-#' @export
-#'
-#' @examples
-compute_scaled_auc <- function(LL, UL, inflection, slope, minimum_dose, maximum_dose, m, s) {
-  
-  f1 = function(x){
-    y = (UL + (LL - UL)/(1 + (2^x/inflection)^slope))
-    z = pmax(pmin((1/2 + tanh(atanh(0.5) * (y - m)/s)/2), 1, na.rm = T), 0, na.rm = T)
-    return(z)
-  } 
-  return(tryCatch(integrate(f1, log2(minimum_dose), log2(maximum_dose))$value/(log2(maximum_dose/minimum_dose)),
-                  error = function(e) {print(e); NA}))
-}
 
-
-#' Computing IC50 for a 4 parameter log-logistic dose response curve
+#' Computes IC50 for a 4-parameter log-logistic dose response curve.
 #'
-#' @param LL : Lower asymptote
-#' @param UL : Upper asymptote
-#' @param inflection : inflection point (EC50)
-#' @param slope : Hill slope ( > 0 for decreasing curves)
-#' @param minimum_dose : Minimum dose
-#' @param maximum_dose : Maximum dose
+#' @param LL Lower asymptote.
+#' @param UL Upper asymptote.
+#' @param inflection Inflection point (EC50).
+#' @param slope Hill slope (> 0 for decreasing curves).
+#' @param minimum_dose Minimum dose tested.
+#' @param maximum_dose Maximum dose tested.
 #'
-#' @return IC50 : The dose value where the curve intersects with y = 0.5, NA returned if they don't intersect in the given dose range.
+#' @return IC50 value, or NA if the curve doesn't cross y = 0.5 within the tested range.
 #' @export
-#'
-#' @examples
 compute_log_ic50 <- function(LL, UL, inflection, slope, minimum_dose, maximum_dose) {
   if((LL >= 0.5) | (UL <= 0.5)) {
     return(NA)
@@ -1089,25 +860,19 @@ compute_log_ic50 <- function(LL, UL, inflection, slope, minimum_dose, maximum_do
   }
 }
 
-#' Computing mean square and median absolute errors for for a 4 parameter log-logistic dose response curve and the corresponding (dose,viability) pairs.
+#' Computes mean square error and median absolute error for a 4-parameter log-logistic model.
 #'
-#' @param FC : Measured viability vector
-#' @param dose : Dose vector corresponding to FC
-#' @param UL : Upper asymptote
-#' @param LL : Lower asymptote
-#' @param slope : Hill slope
-#' @param inflection : inflection point (EC50)
+#' @param FC Measured viability vector.
+#' @param dose Dose vector corresponding to FC.
+#' @param UL Upper asymptote.
+#' @param LL Lower asymptote.
+#' @param slope Hill slope.
+#' @param inflection Inflection point (EC50).
 #'
-#' @return List of mse and mad values.
+#' @return A list containing `mse` and `mad` values.
 #' @export
-#'
-#' @examples
-compute_mse_mad <- function(FC, dose,  UL, LL,  slope, inflection) {
+compute_mse_mad <- function(FC, dose, UL, LL, slope, inflection) {
   FC.pred = UL  + (LL -UL )/(1 + (dose/inflection)^slope)
   residuals = FC - FC.pred
   return(list(mse = mean(residuals^2), mad = median(abs(residuals))))
 }
-
-
-
-
