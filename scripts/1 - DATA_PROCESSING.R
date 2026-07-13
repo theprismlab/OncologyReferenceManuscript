@@ -2,6 +2,7 @@ library(renv)
 renv::restore()
 library(tidyverse)
 library(magrittr)
+library(data.table)
 library(scam)
 library(parallel)
 

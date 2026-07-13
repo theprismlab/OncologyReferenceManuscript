@@ -26,7 +26,11 @@ echo "Setting up output directories in $DATA_DIR..."
 mkdir -p "$DATA_DIR/processed_data"
 mkdir -p "$DATA_DIR/processed_data_without_artifact_correction"
 mkdir -p "$DATA_DIR/biomarker_results"
+mkdir -p "$DATA_DIR/biomarker_results_for_TK_RTK_vignette"
 mkdir -p "$DATA_DIR/release_files"
+
+
+
 
 # Note: The single mount -v "$DATA_DIR:/app/data" covers everything, 
 # because your R scripts use relative paths starting with "data/..."
@@ -34,19 +38,19 @@ mkdir -p "$DATA_DIR/release_files"
 echo "Running Pipeline..."
 
 # # Script 1 — data processing
-docker run --rm $DOCKER_OPTS \
--v "$DATA_DIR:/app/data" \
-oncology-reference "scripts/1 - DATA_PROCESSING.R"
+# docker run --rm $DOCKER_OPTS \
+# -v "$DATA_DIR:/app/data" \
+# oncology-reference "scripts/1 - DATA_PROCESSING.R"
 
 # # Script 2 — uncorrected data processing for benchmarking
-docker run --rm $DOCKER_OPTS \
--v "$DATA_DIR:/app/data" \
-oncology-reference "scripts/2 - DATA_PROCESSING - UNCORRECTED FILES FOR COMPARISON.R"
+# docker run --rm $DOCKER_OPTS \
+# -v "$DATA_DIR:/app/data" \
+# oncology-reference "scripts/2 - DATA_PROCESSING - UNCORRECTED FILES FOR COMPARISON.R"
 
-# Script 3 — biomarker table generation
-docker run --rm $DOCKER_OPTS \
--v "$DATA_DIR:/app/data" \
-oncology-reference "scripts/3 - GENERATE BIOMARKER TABLES.R"
+# # Script 3 — biomarker table generation
+# docker run --rm $DOCKER_OPTS \
+# -v "$DATA_DIR:/app/data" \
+# oncology-reference "scripts/3 - GENERATE BIOMARKER TABLES.R"
 
 # Script 4 — depmap release files
 docker run --rm $DOCKER_OPTS \

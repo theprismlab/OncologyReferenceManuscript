@@ -27,6 +27,20 @@ RUN Rscript -e "renv::restore()"
 
 COPY scripts/ /app/scripts/
 
-ENTRYPOINT ["Rscript"]
+# Create a wrapper script to handle paths with spaces
+RUN cat > /app/run_script.sh << 'EOF'
+#!/bin/bash
+# Create symlinks to avoid spaces in directory names
+cd /app/data
+ln -sf "input data" input_data 2>/dev/null || true
+ln -sf "processed data" processed_data 2>/dev/null || true
+ln -sf "processed data without artifact correction (for benchmarking)" processed_data_uncorrected 2>/dev/null || true
+cd /app
+# Run the R script
+Rscript "$@"
+EOF
+RUN chmod +x /app/run_script.sh
+
+ENTRYPOINT ["/app/run_script.sh"]
 
 CMD ["scripts/1 - DATA_PROCESSING.R"]
