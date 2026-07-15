@@ -486,7 +486,9 @@ target_recovery <- function(Y, file, compound_annotations, features = c("CRISPR"
       values_to = "GeneSymbolOfTargets"
     ) %>%
     dplyr::select(-dummy) %>%
+    dplyr::mutate(GeneSymbolOfTargets = trimws(GeneSymbolOfTargets)) %>% 
     tidyr::drop_na() %>%
+    dplyr::filter(GeneSymbolOfTargets != "", GeneSymbolOfTargets != "NA", GeneSymbolOfTargets != "X") %>% # <-- Strict filter
     dplyr::distinct()
   
   # ---------------------------------------------------------
@@ -495,8 +497,10 @@ target_recovery <- function(Y, file, compound_annotations, features = c("CRISPR"
   bm <- compound_annotations %>%
     dplyr::distinct(cn, GeneSymbolOfTargets) %>%
     tidyr::separate_rows(GeneSymbolOfTargets, sep = ";") %>%
+    dplyr::mutate(GeneSymbolOfTargets = trimws(GeneSymbolOfTargets)) %>% 
     tidyr::drop_na() %>% 
-    dplyr::distinct() %>% 
+    dplyr::filter(GeneSymbolOfTargets != "", GeneSymbolOfTargets != "NA", GeneSymbolOfTargets != "X") %>% # <-- Strict filter
+    dplyr::distinct() %>%
     dplyr::inner_join(feature_gene_map, by = "GeneSymbolOfTargets") %>% 
     dplyr::select(-GeneSymbolOfTargets) %>%
     dplyr::distinct() %>% 

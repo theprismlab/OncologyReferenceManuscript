@@ -37,20 +37,20 @@ mkdir -p "$DATA_DIR/release_files"
 
 echo "Running Pipeline..."
 
-# # Script 1 — data processing
-# docker run --rm $DOCKER_OPTS \
-# -v "$DATA_DIR:/app/data" \
-# oncology-reference "scripts/1 - DATA_PROCESSING.R"
+# Script 1 — data processing
+docker run --rm $DOCKER_OPTS \
+-v "$DATA_DIR:/app/data" \
+oncology-reference "scripts/1 - DATA_PROCESSING.R"
 
-# # Script 2 — uncorrected data processing for benchmarking
-# docker run --rm $DOCKER_OPTS \
-# -v "$DATA_DIR:/app/data" \
-# oncology-reference "scripts/2 - DATA_PROCESSING - UNCORRECTED FILES FOR COMPARISON.R"
+# Script 2 — uncorrected data processing for benchmarking
+docker run --rm $DOCKER_OPTS \
+-v "$DATA_DIR:/app/data" \
+oncology-reference "scripts/2 - DATA_PROCESSING - UNCORRECTED FILES FOR COMPARISON.R"
 
-# # Script 3 — biomarker table generation
-# docker run --rm $DOCKER_OPTS \
-# -v "$DATA_DIR:/app/data" \
-# oncology-reference "scripts/3 - GENERATE BIOMARKER TABLES.R"
+# Script 3 — biomarker table generation
+docker run --rm $DOCKER_OPTS \
+-v "$DATA_DIR:/app/data" \
+oncology-reference "scripts/3 - GENERATE BIOMARKER TABLES.R"
 
 # Script 4 — depmap release files
 docker run --rm $DOCKER_OPTS \
