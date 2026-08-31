@@ -390,7 +390,7 @@ linear_model <- function(X, Y, v.X.min = 0.0025, n.min = 100) {
       dplyr::group_by(y) %>% 
       dplyr::mutate(
         q_val = p.adjust(p_val, method = "BH"),
-        rank = dplyr::min_rank(q_val) 
+        rank = dplyr::min_rank(p_val) 
       ) %>% 
       dplyr::ungroup() %>%
       dplyr::select(x, y, correlation_coef, regression_coef, q_val, rank, p_val, n, var.x, var.y)
