@@ -25,12 +25,13 @@ LAUC <- data.table::fread("data/processed_data/PRISMOncologyReferenceLumLog2AUCM
 
 CompoundList <- data.table::fread("data/input_data/PRISMOncologyReferenceCompoundList.csv") %>% 
   dplyr::mutate(cn = paste0(SampleID, "::", CompoundPlate)) %>%
-  dplyr::filter(Prioritized, cn %in% colnames(LAUC))
+  dplyr::filter(# Prioritized, 
+                cn %in% colnames(LAUC))
 
 selected_compounds <- CompoundList %>% dplyr::pull(cn) %>% unique()
 
-
-LAUC <- LAUC[, selected_compounds, drop = FALSE]
+# We compute biomarkers for all compounds
+# LAUC <- LAUC[, selected_compounds, drop = FALSE]
 
 # LFC <- LFC[, stringr::word(colnames(LFC), 1, 2, sep = stringr::fixed("::")) %in% selected_compounds, drop = FALSE]
 
